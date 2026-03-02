@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiblogauto"
+version = "0.1.0"
+description = "Modular AI-oriented blog generator"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31.0",
+  "rich>=13.7.0",
+]
+
+[project.scripts]
+blogauto = "blogauto.cli:main"
+aiblogauto = "blogauto.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["blogauto*"]

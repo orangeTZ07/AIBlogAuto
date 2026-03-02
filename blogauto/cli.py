@@ -1,0 +1,2043 @@
+from __future__ import annotations
+
+import argparse
+import curses
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import webbrowser
+import json
+import os
+import unicodedata
+import threading
+
+from .builder import BlogBuilder
+from .changes import render_change_page
+from .agent import BlogAgent
+from .config import BlogConfig, load_config, save_config
+from .prompts import write_prompt_files
+from .registry import (
+    BUILTIN_FRAMEWORKS,
+    BUILTIN_STYLES,
+    list_frameworks,
+    list_styles,
+    write_builtins,
+)
+from .scanner import DirectoryScanner
+
+
+def _default_editor_cmd() -> str:
+    return (shutil.which("code") and "code") or "nano"
+
+
+def _default_file_manager_cmd() -> str:
+    if sys.platform == "darwin":
+        return "open"
+    if sys.platform.startswith("win"):
+        return "explorer"
+    return "xdg-open"
+
+
+def _provider_env_var(provider: str) -> str:
+    return {
+        "deepseek": "DEEPSEEK_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "custom": "AI_API_KEY",
+    }.get(provider, "AI_API_KEY")
+
+
+def _secret_file_path(cfg: BlogConfig) -> Path:
+    return cfg.workspace / cfg.ai_secret_file
+
+
+def _save_secret_key(cfg: BlogConfig, provider: str, api_key: str) -> Path:
+    path = _secret_file_path(cfg)
+    data = {"providers": {}}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data.get("providers"), dict):
+                data["providers"] = {}
+        except Exception:
+            data = {"providers": {}}
+    data["providers"][provider] = {
+        "api_key": api_key,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
+    _ensure_gitignore(path.parent, path.name)
+    return path
+
+
+def _ensure_gitignore(workspace: Path, filename: str) -> None:
+    gitignore = workspace / ".gitignore"
+    line = filename.strip()
+    if not line:
+        return
+    if gitignore.exists():
+        content = gitignore.read_text(encoding="utf-8")
+        if line in {x.strip() for x in content.splitlines()}:
+            return
+        with gitignore.open("a", encoding="utf-8") as f:
+            if not content.endswith("\n"):
+                f.write("\n")
+            f.write(line + "\n")
+        return
+    gitignore.write_text(line + "\n", encoding="utf-8")
+
+
+def _run_open_command(command: str, target: Path, wait: bool = False) -> None:
+    argv = shlex.split(command.strip()) + [str(target)]
+    if wait:
+        subprocess.run(argv, check=True)
+    else:
+        subprocess.Popen(argv)
+
+
+def _upsert_index_entry(workspace: Path, entry: dict[str, str]) -> None:
+    index_path = workspace / "index.json"
+    data = {"posts": []}
+    if index_path.exists():
+        try:
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+            if "posts" not in data or not isinstance(data["posts"], list):
+                data["posts"] = []
+        except Exception:
+            data = {"posts": []}
+
+    posts = [p for p in data["posts"] if p.get("slug") != entry["slug"]]
+    posts.append(entry)
+    data["posts"] = sorted(posts, key=lambda x: x.get("slug", ""))
+    index_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def init_workspace(
+    workspace: Path,
+    open_preview: bool = True,
+    selected_style: str | None = None,
+    selected_framework: str | None = None,
+    ai_provider: str | None = None,
+    ai_key_source: str | None = None,
+    ai_model: str | None = None,
+    ai_base_url: str | None = None,
+) -> BlogConfig:
+    cfg = BlogConfig(workspace=workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    cfg.content_dir.mkdir(exist_ok=True)
+    cfg.output_dir.mkdir(exist_ok=True)
+    cfg.changes_dir.mkdir(exist_ok=True)
+
+    write_builtins(cfg.styles_dir, cfg.frameworks_dir)
+    write_prompt_files(cfg.prompts_dir)
+    write_preview(cfg, open_preview=open_preview)
+
+    style_names = list(list_styles(cfg.styles_dir).keys())
+    frame_names = list(list_frameworks(cfg.frameworks_dir).keys())
+
+    if selected_style and selected_style in style_names:
+        cfg.selected_style = selected_style
+    if selected_framework and selected_framework in frame_names:
+        cfg.selected_framework = selected_framework
+
+    if ai_provider:
+        cfg.ai_provider = ai_provider
+    if ai_key_source:
+        cfg.ai_key_source = ai_key_source
+    if ai_model:
+        cfg.ai_model = ai_model
+    if ai_base_url:
+        cfg.ai_base_url = ai_base_url
+
+    cfg.deepseek_model = cfg.ai_model
+    cfg.deepseek_base_url = cfg.ai_base_url
+
+    if not cfg.default_editor:
+        cfg.default_editor = _default_editor_cmd()
+    if not cfg.default_file_manager:
+        cfg.default_file_manager = _default_file_manager_cmd()
+
+    save_config(cfg)
+    seed_example(cfg)
+    return cfg
+
+
+def write_preview(cfg: BlogConfig, open_preview: bool = True) -> None:
+    cfg.previews_dir.mkdir(parents=True, exist_ok=True)
+    styles = list_styles(cfg.styles_dir)
+    frames = list_frameworks(cfg.frameworks_dir)
+    example_framework = cfg.frameworks_dir / "example.html"
+    if not example_framework.exists():
+        example_framework.write_text(
+            """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{title}</title>
+  <link rel="stylesheet" href="{style_href}" />
+</head>
+<body>
+  <main>
+    <header><h1>{blog_name}</h1><p>{subtitle}</p></header>
+    <article>
+      <h2>{title}</h2>
+      <small>{date}</small>
+      <div>{content_html}</div>
+    </article>
+    <footer><p>preview</p></footer>
+  </main>
+</body>
+</html>
+""",
+            encoding="utf-8",
+        )
+
+    cards = []
+    example_tpl = example_framework.read_text(encoding="utf-8")
+    for name, style_path in styles.items():
+        preview_file = cfg.previews_dir / f"style-{name}.html"
+        style_rel = "../content/styles/" + style_path.name
+        preview_file.write_text(
+            example_tpl.format(
+                title=f"样式预览 {name}",
+                blog_name="Style Preview",
+                subtitle="示例框架 example.html + 当前样式",
+                date="today",
+                content_html=(
+                    "<p>这是样式预览页。</p>"
+                    "<p>如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。</p>"
+                ),
+                style_href=style_rel,
+            ),
+            encoding="utf-8",
+        )
+        cards.append(
+            f'<li><a href="style-{name}.html" target="_blank">样式预览: {name}（应用 example.html）</a></li>'
+        )
+
+    for name, frame_path in frames.items():
+        preview_file = cfg.previews_dir / f"framework-{name}.html"
+        tpl = frame_path.read_text(encoding="utf-8")
+        rendered = tpl.format(
+            title=f"框架预览 {name}",
+            blog_name="Framework Preview",
+            subtitle="本 html 没有使用任何样式(css)",
+            date="today",
+            content_html="<p>这是框架结构预览，不使用任何样式。</p>",
+            style_href="",
+        ).replace('<link rel="stylesheet" href="" />', "")
+        rendered = rendered.replace(
+            "</body>",
+            (
+                "<p style='padding:16px;'>本html没有使用任何样式(css)</p>"
+                "<p style='padding:0 16px;'>如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。</p>"
+                "</body>"
+            ),
+        )
+        preview_file.write_text(rendered, encoding="utf-8")
+        cards.append(
+            f'<li><a href="framework-{name}.html" target="_blank">框架预览: {name}（无 CSS）</a></li>'
+        )
+
+    html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIBlogAuto 效果预览</title>
+</head>
+<body>
+  <main>
+    <h1>内置效果预览入口</h1>
+    <p>可先查看样式和框架文件，再在终端中选择默认组合。</p>
+    <p><strong>如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。</strong></p>
+    <ul>{"".join(cards)}</ul>
+  </main>
+</body>
+</html>
+"""
+    out = cfg.previews_dir / "index.html"
+    out.write_text(html, encoding="utf-8")
+    if open_preview:
+        webbrowser.open(out.resolve().as_uri())
+
+
+def seed_example(cfg: BlogConfig) -> None:
+    draft_dir = cfg.content_dir / "welcome"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    article = draft_dir / "my_blog.txt"
+    prompt_file = draft_dir / "prompt.txt"
+
+    if not article.exists():
+        article.write_text(
+            "清空本文件内容后写入你的文章（你可以在这里面向AI提出要求和注意事项）。",
+            encoding="utf-8",
+        )
+    if not prompt_file.exists():
+        prompt_file.write_text(
+            "请读取同目录 my_blog.txt，生成博客页面内容，保留段落结构并输出 HTML 正文。",
+            encoding="utf-8",
+        )
+    _upsert_index_entry(
+        cfg.workspace,
+        {
+            "slug": "welcome",
+            "category": "default",
+            "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
+            "article_file": str(article.relative_to(cfg.workspace)),
+            "prompt_file": str(prompt_file.relative_to(cfg.workspace)),
+            "page_url": "posts/welcome/index.html",
+            "style": "__default__",
+            "framework": "__default__",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    _ensure_homepage_prompts(cfg)
+
+
+def _ensure_homepage_prompts(cfg: BlogConfig) -> None:
+    cfg.prompts_dir.mkdir(parents=True, exist_ok=True)
+    p = cfg.prompts_dir / "homepage-index-fields.prompt.txt"
+    if not p.exists():
+        p.write_text(
+            (
+                "你要根据以下字段构建主页索引：\\n"
+                "- slug: 博客短名\\n"
+                "- category: 分类\\n"
+                "- draft_dir: 原始草稿路径\\n"
+                "- article_file: 内容文件路径\\n"
+                "- page_url: 文章页面路径（必须精确指向每篇文章的 index.html）\\n"
+                "- style/framework: 文章选择的样式和框架（__default__ 表示使用默认）\\n"
+                "请按用户提供的目录风格偏好组织索引区块。\\n"
+            ),
+            encoding="utf-8",
+        )
+    p_style = cfg.prompts_dir / "homepage-directory-style.prompt.txt"
+    if not p_style.exists():
+        p_style.write_text("按分类分组并按创建时间倒序", encoding="utf-8")
+    p_framework = cfg.prompts_dir / "homepage-framework.prompt.txt"
+    if not p_framework.exists():
+        p_framework.write_text("信息密度高，左侧分类导航，右侧文章索引", encoding="utf-8")
+
+
+def cmd_build_homepage_with_ai(
+    workspace: Path,
+    directory_style: str,
+    framework_goal: str,
+    style_name: str | None = None,
+    quiet: bool = False,
+) -> Path:
+    cfg = load_config(workspace)
+    _ensure_homepage_prompts(cfg)
+    index_path = cfg.workspace / "index.json"
+    if not index_path.exists():
+        raise FileNotFoundError("未找到 index.json，先创建文章草稿再生成主页。")
+    posts_json = index_path.read_text(encoding="utf-8")
+    fields_prompt = (cfg.prompts_dir / "homepage-index-fields.prompt.txt").read_text(
+        encoding="utf-8"
+    )
+    agent = BlogAgent(cfg)
+    homepage_html = agent.generate_homepage(
+        posts_json=posts_json,
+        directory_style=directory_style,
+        index_fields_prompt=fields_prompt,
+        framework_goal=framework_goal,
+        style_name=style_name,
+    )
+    if style_name and "stylesheet" not in homepage_html:
+        homepage_html = homepage_html.replace(
+            "</head>",
+            f'  <link rel="stylesheet" href="styles/{style_name}.css" />\n</head>',
+        )
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    out = cfg.output_dir / "index.html"
+    out.write_text(homepage_html, encoding="utf-8")
+    if not quiet:
+        print(f"主页已生成: {out}")
+    return out
+
+
+def cmd_build(workspace: Path, quiet: bool = False) -> dict[str, int]:
+    cfg = load_config(workspace)
+    report = DirectoryScanner(workspace).scan_content(cfg.content_dir)
+    builder = BlogBuilder(cfg)
+    result = builder.build()
+    summary = {
+        "generated_posts": len(result.generated_posts),
+        "added": len(report.added),
+        "modified": len(report.modified),
+        "removed": len(report.removed),
+    }
+    if not quiet:
+        print(f"构建完成，文章数量: {summary['generated_posts']}")
+        print(
+            f"扫描结果: 新增{summary['added']} 修改{summary['modified']} 删除{summary['removed']}"
+        )
+    return summary
+
+
+def cmd_submit(
+    workspace: Path, message: str, no_open: bool, quiet: bool = False
+) -> Path:
+    cfg = load_config(workspace)
+    scanner = DirectoryScanner(workspace)
+    pre_report = scanner.scan_content(cfg.content_dir)
+
+    builder = BlogBuilder(cfg)
+    builder.build()
+
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=workspace, check=True)
+
+    change_page = render_change_page(
+        cfg.changes_dir, pre_report, open_browser=not no_open
+    )
+    if not quiet:
+        print(f"提交完成，变动页: {change_page}")
+    return change_page
+
+
+def cmd_set_theme(
+    workspace: Path, style: str | None, framework: str | None, quiet: bool = False
+) -> None:
+    cfg = load_config(workspace)
+    styles = list_styles(cfg.styles_dir)
+    frames = list_frameworks(cfg.frameworks_dir)
+
+    if style:
+        if style not in styles:
+            raise ValueError(f"样式不存在: {style}")
+        cfg.selected_style = style
+    if framework:
+        if framework not in frames:
+            raise ValueError(f"框架不存在: {framework}")
+        cfg.selected_framework = framework
+
+    save_config(cfg)
+    if not quiet:
+        print("默认样式/框架已更新（只影响后续生成的页面）")
+
+
+def cmd_add_style(
+    workspace: Path, name: str, css_file: Path, quiet: bool = False
+) -> Path:
+    cfg = load_config(workspace)
+    target = cfg.styles_dir / f"{name}.css"
+    target.write_text(css_file.read_text(encoding="utf-8"), encoding="utf-8")
+    if not quiet:
+        print(f"已添加 AI 定制样式: {target}")
+    return target
+
+
+def cmd_new_post(
+    workspace: Path,
+    slug: str,
+    relative_path_suffix: str,
+    category: str,
+    style_choice: str,
+    framework_choice: str,
+    quiet: bool = False,
+) -> dict[str, Path]:
+    cfg = load_config(workspace)
+    relative = relative_path_suffix.strip().strip("/")
+    if not relative:
+        relative = slug
+
+    draft_dir = cfg.content_dir / relative
+    article = draft_dir / "my_blog.txt"
+    prompt_file = draft_dir / "prompt.txt"
+
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    if not article.exists():
+        article.write_text(
+            "清空本文件内容后写入你的文章（你可以在这里面向AI提出要求和注意事项）。",
+            encoding="utf-8",
+        )
+    style_path = (
+        str((cfg.styles_dir / f"{style_choice}.css").relative_to(cfg.workspace))
+        if style_choice != "__default__"
+        else f"默认样式（由配置 selected_style 决定，目录: {cfg.styles_dir.relative_to(cfg.workspace)}）"
+    )
+    framework_path = (
+        str(
+            (cfg.frameworks_dir / f"{framework_choice}.html").relative_to(cfg.workspace)
+        )
+        if framework_choice != "__default__"
+        else f"默认框架（由配置 selected_framework 决定，目录: {cfg.frameworks_dir.relative_to(cfg.workspace)}）"
+    )
+    prompt_file.write_text(
+        (
+            "你是一个专业的博客美化师，博客制作者，你擅长模仿作者语气并扩充博客。\n"
+            "请阅读同目录下 my_blog.txt，并生成 index.html（博客页面）。\n"
+            "请优先遵循本目录提示词，再生成内容。\n"
+            f"样式来源: {style_path}\n"
+            f"框架来源: {framework_path}\n"
+            "如果你无法访问这些内容，请让你的调用者确保你能够达到my_blog/content/styles和frameworks。"
+        ),
+        encoding="utf-8",
+    )
+
+    _upsert_index_entry(
+        cfg.workspace,
+        {
+            "slug": slug,
+            "category": category or "default",
+            "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
+            "article_file": str(article.relative_to(cfg.workspace)),
+            "prompt_file": str(prompt_file.relative_to(cfg.workspace)),
+            "page_url": f"posts/{slug}/index.html",
+            "style": style_choice,
+            "framework": framework_choice,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+
+    if not quiet:
+        print(f"已准备文章草稿: {article}")
+
+    return {
+        "draft_dir": draft_dir,
+        "article_file": article,
+        "prompt_file": prompt_file,
+    }
+
+
+def list_existing_blogs(workspace: Path) -> list[dict[str, str]]:
+    index_path = workspace / "index.json"
+    if not index_path.exists():
+        return []
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        posts = data.get("posts", [])
+        return [p for p in posts if isinstance(p, dict)]
+    except Exception:
+        return []
+
+
+def cmd_refresh_home_index(workspace: Path, quiet: bool = False) -> Path:
+    index_path = workspace / "index.json"
+    if not index_path.exists():
+        raise FileNotFoundError("未找到 index.json，先创建文章草稿。")
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    posts = data.get("posts", [])
+    for item in posts:
+        slug = str(item.get("slug", "")).strip()
+        if not slug:
+            continue
+        item["page_url"] = f"posts/{slug}/index.html"
+        item["category"] = item.get("category") or "default"
+        item["style"] = item.get("style") or "__default__"
+        item["framework"] = item.get("framework") or "__default__"
+    data["posts"] = posts
+    index_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    if not quiet:
+        print(f"主页索引已更新: {index_path}")
+    return index_path
+
+
+def _read_index_data(index_path: Path) -> dict:
+    if not index_path.exists():
+        return {"posts": []}
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(data.get("posts"), list):
+            data["posts"] = []
+        return data
+    except Exception:
+        return {"posts": []}
+
+
+def _changed_posts(before: dict, after: dict) -> list[dict]:
+    before_map = {str(x.get("slug", "")): x for x in before.get("posts", []) if x.get("slug")}
+    changed: list[dict] = []
+    for item in after.get("posts", []):
+        slug = str(item.get("slug", ""))
+        if not slug:
+            continue
+        if slug not in before_map or before_map[slug] != item:
+            changed.append(item)
+    return changed
+
+
+def _ensure_unique_slug(slug: str, used: set[str]) -> str:
+    base = slug or "custom"
+    if base not in used:
+        used.add(base)
+        return base
+    i = 2
+    while True:
+        candidate = f"{base}-{i}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        i += 1
+
+
+def cmd_rescan_content_to_index(workspace: Path, quiet: bool = False) -> tuple[Path, int]:
+    cfg = load_config(workspace)
+    index_path = workspace / "index.json"
+    data = _read_index_data(index_path)
+    posts = [p for p in data.get("posts", []) if isinstance(p, dict)]
+    used_slugs = {str(p.get("slug", "")).strip() for p in posts if p.get("slug")}
+    added = 0
+
+    def add_entry(entry: dict[str, str]) -> None:
+        nonlocal added
+        slug = str(entry.get("slug", "")).strip()
+        if not slug:
+            slug = "custom"
+        if any(str(p.get("slug", "")).strip() == slug for p in posts):
+            return
+        entry["slug"] = _ensure_unique_slug(slug, used_slugs)
+        posts.append(entry)
+        added += 1
+
+    # 1) 草稿文件扫描：my_blog/myblog/post
+    draft_files = (
+        list(cfg.content_dir.glob("**/my_blog.txt"))
+        + list(cfg.content_dir.glob("**/myblog.txt"))
+        + list(cfg.content_dir.glob("**/post.txt"))
+    )
+    for file in sorted(draft_files):
+        rel_dir = file.parent.relative_to(workspace)
+        slug_guess = file.parent.name or "custom"
+        add_entry(
+            {
+                "slug": slug_guess,
+                "category": "Custom",
+                "draft_dir": str(rel_dir),
+                "article_file": str(file.relative_to(workspace)),
+                "prompt_file": str((file.parent / "prompt.txt").relative_to(workspace))
+                if (file.parent / "prompt.txt").exists()
+                else "Custom",
+                "page_url": f"posts/{slug_guess}/index.html",
+                "style": "Custom",
+                "framework": "Custom",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+
+    # 2) 已存在页面扫描：任意 index.html（排除主页和模板/预览）
+    html_candidates = list(cfg.content_dir.glob("**/index.html"))
+    for html in sorted(html_candidates):
+        rel = html.relative_to(cfg.content_dir)
+        if rel == Path("index.html"):
+            continue
+        if any(part in {"styles", "frameworks", "previews"} for part in rel.parts):
+            continue
+        slug_guess = html.parent.name or "custom"
+        add_entry(
+            {
+                "slug": slug_guess,
+                "category": "Custom",
+                "draft_dir": "Custom",
+                "article_file": "Custom",
+                "prompt_file": "Custom",
+                "page_url": str(html.relative_to(cfg.content_dir)),
+                "style": "Custom",
+                "framework": "Custom",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+
+    data["posts"] = sorted(posts, key=lambda x: str(x.get("slug", "")))
+    index_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not quiet:
+        print(f"扫描完成: {index_path}, 新增 {added} 条")
+    return index_path, added
+
+
+@dataclass
+class MenuItem:
+    key: str
+    title: str
+    hint: str
+    enabled: bool = True
+
+
+class VimTUIApp:
+    def __init__(
+        self, stdscr: curses.window, workspace: Path, no_browser: bool
+    ) -> None:
+        self.stdscr = stdscr
+        self.workspace = workspace
+        self.no_browser = no_browser
+        self.logs: list[str] = []
+        self.menu = [
+            MenuItem("init", "第一次使用：一键准备", "自动完成目录与基础设置。"),
+            MenuItem(
+                "refresh_index",
+                "一键生成网页",
+                "更新网站主页文章索引，确保每篇文章都准确指向 index.html。",
+            ),
+            MenuItem(
+                "rescan_content",
+                "迁移扫描 content",
+                "快速扫描 content 并同步到 index.json，未定义字段自动写为 Custom。",
+            ),
+            MenuItem(
+                "build_home",
+                "生成主页（使用AI）",
+                "基于索引和你的要求生成主页，先预览，再决定接受或继续修改。",
+            ),
+            MenuItem(
+                "new",
+                "新建文章草稿",
+                "创建草稿目录 + my_blog.txt + prompt.txt，并登记到 index.json。",
+            ),
+            MenuItem(
+                "theme",
+                "换一个页面风格",
+                "只影响之后新生成的页面，不会改动已生成页面。",
+            ),
+            MenuItem("query_blogs", "查看已有博客", "查看已创建博客列表及其目录位置。"),
+            MenuItem(
+                "ai_generate",
+                "用内置 AI 生成样式/框架",
+                "交互式输入目标后，自动生成并保存模板文件。",
+            ),
+            MenuItem(
+                "sync_pending",
+                "一键同步样式和框架（待实现）",
+                "预留入口：后续支持一键拉取并同步模板资源。",
+                enabled=False,
+            ),
+            MenuItem(
+                "edit_template",
+                "打开模板目录并编辑文件",
+                "快速选择样式/框架文件并用默认编辑器打开。",
+            ),
+        ]
+        self.selected = 0
+        self.running = True
+        self.c_purple = 0
+        self.c_blue = 0
+        self.c_red = 0
+        self.c_text = 0
+        self.c_focus = 0
+
+    def run(self) -> int:
+        curses.curs_set(0)
+        self.stdscr.keypad(True)
+        self._init_theme()
+        self._splash()
+        while self.running:
+            self._draw_main()
+            key = self.stdscr.getch()
+            if key in (ord("j"), curses.KEY_DOWN):
+                self.selected = (self.selected + 1) % len(self.menu)
+            elif key in (ord("k"), curses.KEY_UP):
+                self.selected = (self.selected - 1) % len(self.menu)
+            elif key in (10, 13, curses.KEY_ENTER, ord("l")):
+                self._run_menu_action(self.menu[self.selected])
+            elif ord("1") <= key <= ord("9"):
+                n = key - ord("1")
+                if n < len(self.menu):
+                    self.selected = n
+                    self._run_menu_action(self.menu[self.selected])
+            elif key == ord(":"):
+                self._command_palette()
+            elif key == ord("?"):
+                self._show_help()
+            elif key in (ord("q"), ord("h")):
+                self.running = False
+        return 0
+
+    def _init_theme(self) -> None:
+        if not curses.has_colors():
+            return
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_MAGENTA, -1)  # purple/pink
+        curses.init_pair(2, curses.COLOR_CYAN, -1)  # blue
+        curses.init_pair(3, curses.COLOR_RED, -1)  # red
+        curses.init_pair(4, curses.COLOR_WHITE, -1)  # text
+        curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_MAGENTA)
+
+        self.c_purple = curses.color_pair(1) | curses.A_BOLD
+        self.c_blue = curses.color_pair(2) | curses.A_BOLD
+        self.c_red = curses.color_pair(3) | curses.A_BOLD
+        self.c_text = curses.color_pair(4)
+        self.c_focus = curses.color_pair(5) | curses.A_BOLD
+
+    def _splash(self) -> None:
+        h, w = self.stdscr.getmaxyx()
+        title = "AIBlogAuto"
+        subtitle = "Neon Purple Blue Red"
+        start_x = 4
+        end_x = max(start_x + 10, w - 5)
+        y = max(2, h // 2 - 2)
+
+        self.stdscr.clear()
+        self._safe_addstr(y - 2, max(2, (w - len(title)) // 2), title, self.c_purple)
+        self._safe_addstr(
+            y - 1, max(2, (w - len(subtitle)) // 2), subtitle, self.c_blue
+        )
+
+        for x in range(start_x, end_x):
+            self._safe_addstr(y, x, "─", self.c_red)
+            self.stdscr.refresh()
+            time.sleep(0.003)
+
+        for offset in range(0, min(8, h // 3)):
+            self.stdscr.clear()
+            self._safe_addstr(y + offset, start_x, "─" * (end_x - start_x), self.c_red)
+            self.stdscr.refresh()
+            time.sleep(0.02)
+
+    def _draw_header(self) -> None:
+        _, w = self.stdscr.getmaxyx()
+        line = "━" * max(10, w - 2)
+        self._safe_addstr(0, 0, line, self.c_purple)
+        self._safe_addstr(1, 2, "AIBlogAuto", self.c_purple)
+        self._safe_addstr(2, 2, f"项目目录: {self.workspace}", self.c_text)
+        self._safe_addstr(
+            3,
+            2,
+            "Ctrl+Z 暂停程序，终端输入 fg 恢复 | ? 键位帮助 | :logs 动作日志",
+            self.c_text,
+        )
+        self._safe_addstr(4, 0, line, self.c_blue)
+
+    def _draw_footer(self) -> None:
+        h, _ = self.stdscr.getmaxyx()
+        style, frame = self._current_theme_labels()
+        self._safe_addstr(
+            h - 4,
+            2,
+            "提示: 使用自己的agent软件来修改，由AIBlogAuto来管理，体验更佳噢",
+            self.c_red,
+        )
+        self._safe_addstr(
+            h - 3, 2, f"状态栏 | 默认样式: {style} | 默认框架: {frame}", self.c_blue
+        )
+        self._safe_addstr(
+            h - 2,
+            2,
+            "导航: j/k 上下  Enter 确认  1~9 直达  q 返回/退出  : 命令",
+            self.c_text,
+        )
+
+    def _current_theme_labels(self) -> tuple[str, str]:
+        cfg_path = self.workspace / "blogauto.json"
+        if not cfg_path.exists():
+            return "-", "-"
+        try:
+            cfg = load_config(self.workspace)
+            return cfg.selected_style, cfg.selected_framework
+        except Exception:
+            return "-", "-"
+
+    def _draw_main(self) -> None:
+        self.stdscr.clear()
+        self._draw_header()
+        ready = "已准备" if (self.workspace / "blogauto.json").exists() else "未准备"
+        self._safe_addstr(6, 2, f"当前状态: {ready}", self.c_blue)
+        self._safe_addstr(7, 2, "主菜单（按数字可直接进入）", self.c_text)
+
+        for idx, item in enumerate(self.menu):
+            prefix = "❯" if idx == self.selected else " "
+            disable_tag = " [待实现]" if not item.enabled else ""
+            text = f"{prefix} [{idx + 1}] {item.title}{disable_tag}"
+            style = self.c_focus if idx == self.selected else self.c_text
+            self._safe_addstr(9 + idx, 4, text, style)
+
+        tip_top = 9 + len(self.menu) + 1
+        self._draw_box(tip_top, 2, 5, "功能注解")
+        self._safe_addstr(tip_top + 2, 4, self.menu[self.selected].hint, self.c_text)
+
+        self._draw_footer()
+        self.stdscr.refresh()
+
+    def _show_message(self, title: str, lines: list[str]) -> None:
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(6, 2, title, self.c_purple)
+            for i, text in enumerate(lines):
+                self._safe_addstr(8 + i, 4, text, self.c_text)
+            self._safe_addstr(10 + len(lines), 4, "按 q 返回", self.c_blue)
+            self._draw_footer()
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key == ord("q"):
+                return
+            if key == ord("?"):
+                self._show_help()
+            if key == ord(":") and self._command_palette():
+                return
+
+    def _show_new_post_result(
+        self, slug: str, draft_dir: Path, article_file: Path, prompt_file: Path
+    ) -> None:
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(6, 2, "草稿创建完成", self.c_purple)
+
+            self._safe_addstr(8, 4, "已生成文章模板：", self.c_text)
+            relative_dir = draft_dir.relative_to(self.workspace)
+            folder_name = relative_dir.name
+            parent = str(relative_dir.parent)
+            base = f"{parent}/" if parent and parent != "." else ""
+            line_y = 9
+            self._safe_addstr(line_y, 6, base, self.c_text)
+            self._safe_addstr(line_y, 6 + len(base), folder_name, self.c_red)
+            self._safe_addstr(
+                line_y, 6 + len(base) + len(folder_name), "/my_blog.txt", self.c_text
+            )
+
+            self._safe_addstr(
+                11, 4, "提示：修改 my_blog.txt 来填入文章内容。", self.c_text
+            )
+            self._safe_addstr(
+                12, 4, "完成后可调用 codex / claude code / copilot。", self.c_text
+            )
+            self._safe_addstr(
+                13, 4, "建议优先使用你自备的 AI agent，体验通常更好。", self.c_text
+            )
+            self._safe_addstr(
+                14,
+                4,
+                f"请让它阅读提示词：{prompt_file.relative_to(self.workspace)}",
+                self.c_blue,
+            )
+            self._safe_addstr(
+                16,
+                4,
+                f"文章文件：{article_file.relative_to(self.workspace)}",
+                self.c_text,
+            )
+            self._safe_addstr(17, 4, "目录登记：index.json 已更新", self.c_text)
+            self._safe_addstr(19, 4, "按 q 返回", self.c_blue)
+            self._draw_footer()
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key == ord("q"):
+                return
+            if key == ord("?"):
+                self._show_help()
+            if key == ord(":") and self._command_palette():
+                return
+
+    def _choose_from_list(
+        self, title: str, items: list[tuple[str, str]], default_idx: int = 0
+    ) -> str | None:
+        idx = default_idx
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(6, 2, title, self.c_purple)
+            self._safe_addstr(
+                7, 2, "j/k 选择, Enter 确认, 1~9 直达, q 返回", self.c_text
+            )
+            for i, (label, _) in enumerate(items):
+                prefix = "❯" if i == idx else " "
+                style = self.c_focus if i == idx else self.c_text
+                self._safe_addstr(9 + i, 4, f"{prefix} [{i + 1}] {label}", style)
+            self._draw_footer()
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (ord("j"), curses.KEY_DOWN):
+                idx = (idx + 1) % len(items)
+            elif key in (ord("k"), curses.KEY_UP):
+                idx = (idx - 1) % len(items)
+            elif key in (10, 13, curses.KEY_ENTER):
+                return items[idx][1]
+            elif ord("1") <= key <= ord("9"):
+                n = key - ord("1")
+                if n < len(items):
+                    return items[n][1]
+            elif key == ord("q"):
+                return None
+            elif key == ord("?"):
+                self._show_help()
+            elif key == ord(":") and self._command_palette():
+                return None
+
+    def _input_line(self, title: str, prompt: str, default: str = "") -> str | None:
+        buf = list(default)
+        pos = len(buf)
+        insert_mode = False
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(6, 2, title, self.c_purple)
+            self._safe_addstr(8, 2, prompt, self.c_text)
+            self._safe_addstr(9, 4, "".join(buf) + " ", self.c_blue)
+            mode_text = (
+                "-- INSERT --" if insert_mode else "-- NORMAL -- (按 i 进入输入模式)"
+            )
+            self._safe_addstr(
+                10, 2, mode_text, self.c_red if insert_mode else self.c_text
+            )
+            self._safe_addstr(
+                11,
+                2,
+                "NORMAL: i 进入输入, Enter 确认, q 返回 | INSERT: Esc 退出输入",
+                self.c_text,
+            )
+            self._draw_footer()
+            if insert_mode:
+                curses.curs_set(1)
+                cursor_x = 4 + self._display_width("".join(buf[:pos]))
+                self.stdscr.move(9, cursor_x)
+            else:
+                curses.curs_set(0)
+            self.stdscr.refresh()
+
+            try:
+                key = self.stdscr.get_wch()
+            except curses.error:
+                continue
+            if insert_mode:
+                if key == "\x1b":  # ESC
+                    insert_mode = False
+                    continue
+                if key in (curses.KEY_BACKSPACE, 127, 8, "\b", "\x7f"):
+                    if pos > 0:
+                        buf.pop(pos - 1)
+                        pos -= 1
+                    continue
+                if key == curses.KEY_LEFT:
+                    pos = max(0, pos - 1)
+                    continue
+                if key == curses.KEY_RIGHT:
+                    pos = min(len(buf), pos + 1)
+                    continue
+                if key in (10, 13, curses.KEY_ENTER, "\n", "\r"):
+                    buf.insert(pos, "\n")
+                    pos += 1
+                    continue
+                if isinstance(key, str) and key.isprintable():
+                    buf.insert(pos, key)
+                    pos += 1
+                continue
+
+            if key in (ord("i"), "i"):
+                insert_mode = True
+                continue
+            if key in (10, 13, curses.KEY_ENTER, "\n", "\r"):
+                return "".join(buf).strip()
+            if key in (ord("q"), "q") and not buf:
+                return None
+            if key in (ord("?"), "?"):
+                self._show_help()
+                continue
+            if key in (ord(":"), ":") and not buf:
+                if self._command_palette():
+                    return None
+                continue
+
+    def _display_width(self, text: str) -> int:
+        width = 0
+        for ch in text:
+            if ch == "\n":
+                continue
+            width += 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+        return width
+
+    def _run_menu_action(self, item: MenuItem) -> None:
+        if item.key == "sync_pending":
+            self._show_sync_placeholder()
+            return
+
+        if item.key == "init":
+            self._action_init()
+        elif item.key == "refresh_index":
+            self._action_refresh_index()
+        elif item.key == "rescan_content":
+            self._action_rescan_content()
+        elif item.key == "build_home":
+            self._action_build_homepage_ai()
+        elif item.key == "new":
+            self._action_new_post()
+        elif item.key == "theme":
+            self._action_set_theme()
+        elif item.key == "query_blogs":
+            self._action_query_blogs()
+        elif item.key == "ai_generate":
+            self._action_ai_generate_assets()
+        elif item.key == "edit_template":
+            self._action_edit_template_file()
+
+    def _action_init(self) -> None:
+        styles = [(s.name, s.name) for s in BUILTIN_STYLES]
+        frames = [
+            (f"{f.name}（一个 HTML 布局模板等内容）", f.name)
+            for f in BUILTIN_FRAMEWORKS
+        ]
+
+        style = self._choose_from_list("一键准备：先选默认样式", styles, default_idx=0)
+        if style is None:
+            return
+        frame = self._choose_from_list("一键准备：再选默认框架", frames, default_idx=0)
+        if frame is None:
+            return
+
+        provider = self._choose_from_list(
+            "一键准备：选择 AI 服务商",
+            [
+                ("DeepSeek（默认）", "deepseek"),
+                ("OpenAI 兼容接口（如 OpenAI / OpenRouter）", "openai"),
+                ("Anthropic Claude", "anthropic"),
+                ("自定义 OpenAI 兼容接口", "custom"),
+            ],
+            default_idx=0,
+        )
+        if provider is None:
+            return
+
+        default_base = {
+            "deepseek": "https://api.deepseek.com",
+            "openai": "https://api.openai.com/v1",
+            "anthropic": "https://api.anthropic.com",
+            "custom": "https://api.deepseek.com",
+        }.get(provider, "https://api.deepseek.com")
+        default_model = {
+            "deepseek": "deepseek-chat",
+            "openai": "gpt-4o-mini",
+            "anthropic": "claude-3-5-sonnet-latest",
+            "custom": "",
+        }.get(provider, "")
+
+        model = self._input_line(
+            "AI 设置", "输入模型名（可直接回车用默认）:", default=default_model
+        )
+        if model is None:
+            return
+        base_url = self._input_line(
+            "AI 设置", "输入 API Base URL（可回车用默认）:", default=default_base
+        )
+        if base_url is None:
+            return
+        api_key = self._input_line(
+            "AI 设置", "输入 API Key（可后续在配置里再改）:", default=""
+        )
+        if api_key is None:
+            return
+
+        key_source = self._choose_from_list(
+            "API Key 保存方式",
+            [
+                ("读取环境变量（推荐）", "env"),
+                ("写入单独密钥文件（请勿暴露到 GitHub）", "file"),
+            ],
+            default_idx=0,
+        )
+        if key_source is None:
+            return
+
+        if key_source == "env" and api_key:
+            os.environ[_provider_env_var(provider)] = api_key
+
+        cfg = self._run_with_busy(
+            "正在处理：初始化项目目录与预览文件...",
+            lambda: init_workspace(
+                self.workspace,
+                open_preview=not self.no_browser,
+                selected_style=style,
+                selected_framework=frame,
+                ai_provider=provider,
+                ai_key_source=key_source,
+                ai_model=model or None,
+                ai_base_url=base_url or None,
+            ),
+        )
+        secret_notice = ""
+        if key_source == "file":
+            if not api_key:
+                self._show_message(
+                    "需要 API Key", ["你选择了密钥文件模式，但没有输入 API Key。"]
+                )
+                return
+            secret_path = _save_secret_key(cfg, provider, api_key)
+            secret_notice = f"密钥文件：{secret_path.name}（已自动加入 .gitignore）"
+        self._log(
+            f"完成初始化（样式={cfg.selected_style}, 框架={cfg.selected_framework}）"
+        )
+        self._show_message(
+            "一键准备完成",
+            [
+                f"目录：{cfg.workspace}",
+                f"AI 服务商：{cfg.ai_provider}",
+                (
+                    f"API Key 环境变量：{_provider_env_var(cfg.ai_provider)}（仅当前会话，不写入项目文件）"
+                    if key_source == "env"
+                    else secret_notice
+                ),
+                f"默认编辑器：{cfg.default_editor}",
+                f"默认文件管理器：{cfg.default_file_manager}",
+                "部署提示：以 GitHub Pages 为例，请将 content/* 放在仓库根目录。",
+            ],
+        )
+
+    def _action_new_post(self) -> None:
+        if not self._ensure_ready():
+            return
+        slug = self._input_line("新建文章草稿", "给文章起个英文短名（例：test2222）:")
+        if slug is None or not slug:
+            return
+
+        cfg = load_config(self.workspace)
+        prefix = str(cfg.content_dir.relative_to(self.workspace))
+        suffix = self._input_line(
+            "新建文章草稿",
+            f"当前统一博客目录：{prefix}/ 请输入后续目录（用 / 分层，留空用 {slug}）:",
+            default=slug,
+        )
+        if suffix is None:
+            return
+
+        suffix = suffix.strip() or slug
+        cfg.draft_structure_template = suffix
+        save_config(cfg)
+
+        path_parts = [p for p in suffix.split("/") if p]
+        default_category = path_parts[0] if path_parts else "default"
+        category = self._input_line(
+            "新建文章草稿", "分类名（用于主页索引）:", default=default_category
+        )
+        if category is None or not category:
+            return
+
+        styles = list_styles(cfg.styles_dir)
+        frames = list_frameworks(cfg.frameworks_dir)
+        style_choice = self._choose_from_list(
+            "这篇文章用什么样式？",
+            [("使用默认样式（来自“换一个页面风格”）", "__default__")]
+            + [
+                (f"{n} [来源: {p.relative_to(self.workspace)}]", n)
+                for n, p in styles.items()
+            ],
+            default_idx=0,
+        )
+        if style_choice is None:
+            return
+        frame_choice = self._choose_from_list(
+            "这篇文章用什么框架？",
+            [("使用默认框架（来自“换一个页面风格”）", "__default__")]
+            + [
+                (
+                    f"{n}（一个 HTML 布局模板等内容） [来源: {p.relative_to(self.workspace)}]",
+                    n,
+                )
+                for n, p in frames.items()
+            ],
+            default_idx=0,
+        )
+        if frame_choice is None:
+            return
+
+        result = cmd_new_post(
+            self.workspace,
+            slug,
+            relative_path_suffix=suffix,
+            category=category,
+            style_choice=style_choice,
+            framework_choice=frame_choice,
+            quiet=True,
+        )
+        draft_dir = result["draft_dir"]
+        article_file = result["article_file"]
+        prompt_file = result["prompt_file"]
+        self._log(f"创建草稿：{slug} -> {draft_dir.relative_to(self.workspace)}")
+
+        action = self._choose_from_list(
+            "创建完成后要不要直接打开？",
+            [
+                ("只打开编辑器", "editor"),
+                ("只在文件管理器中显示", "manager"),
+                ("小孩子才做选择，以上都要", "both"),
+                ("先不打开", "none"),
+            ],
+        )
+        if action is None:
+            action = "none"
+
+        self._open_after_create(cfg, action, article_file, draft_dir)
+        self._show_new_post_result(slug, draft_dir, article_file, prompt_file)
+
+    def _action_refresh_index(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        _ensure_homepage_prompts(cfg)
+        index_file = self.workspace / "index.json"
+        before = _read_index_data(index_file)
+        index_path = self._run_with_busy(
+            "正在处理：更新主页索引字段...",
+            lambda: cmd_refresh_home_index(self.workspace, quiet=True),
+        )
+        after = _read_index_data(index_path)
+        changed = _changed_posts(before, after)
+        home_path = self._run_with_busy(
+            "正在处理：让 AI 将索引更新写入主页...",
+            lambda: self._apply_index_updates_to_home(cfg, after, changed),
+        )
+        try:
+            webbrowser.open(home_path.resolve().as_uri())
+        except Exception:
+            pass
+        self._log("主页索引已更新")
+        self._show_message(
+            "主页索引更新完成",
+            [
+                f"索引文件: {index_path.relative_to(self.workspace)}",
+                "每篇文章已确保包含 page_url=posts/<slug>/index.html",
+                f"AI 已同步更新主页: {home_path.relative_to(self.workspace)}",
+                f"本次更新条目数: {len(changed)}",
+                "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
+            ],
+        )
+
+    def _action_rescan_content(self) -> None:
+        if not self._ensure_ready():
+            return
+        index_path, added = self._run_with_busy(
+            "正在处理：扫描 content 并迁移写入 index.json...",
+            lambda: cmd_rescan_content_to_index(self.workspace, quiet=True),
+        )
+        self._log(f"迁移扫描完成：新增 {added} 条")
+        self._show_message(
+            "迁移扫描完成",
+            [
+                f"索引文件: {index_path.relative_to(self.workspace)}",
+                f"新增条目: {added}",
+                "未定义字段已自动写为 Custom。",
+            ],
+        )
+
+    def _apply_index_updates_to_home(self, cfg: BlogConfig, after: dict, changed: list[dict]) -> Path:
+        agent = BlogAgent(cfg)
+        fields_prompt = (cfg.prompts_dir / "homepage-index-fields.prompt.txt").read_text(encoding="utf-8")
+        directory_style = (cfg.prompts_dir / "homepage-directory-style.prompt.txt").read_text(encoding="utf-8")
+        framework_goal = (cfg.prompts_dir / "homepage-framework.prompt.txt").read_text(encoding="utf-8")
+
+        posts_json = json.dumps(after, ensure_ascii=False, indent=2)
+        style_name = cfg.selected_style
+        out = cfg.output_dir / "index.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        if out.exists():
+            current = out.read_text(encoding="utf-8")
+            feedback = (
+                "请把以下更新条目合并到主页索引，并保持未变更部分尽量稳定：\n"
+                + json.dumps(changed, ensure_ascii=False, indent=2)
+            )
+            html = agent.refine_homepage(
+                posts_json=posts_json,
+                directory_style=directory_style,
+                index_fields_prompt=fields_prompt,
+                framework_goal=framework_goal,
+                current_html=current,
+                feedback=feedback,
+                style_name=style_name,
+            )
+        else:
+            html = agent.generate_homepage(
+                posts_json=posts_json,
+                directory_style=directory_style,
+                index_fields_prompt=fields_prompt,
+                framework_goal=framework_goal,
+                style_name=style_name,
+            )
+        if style_name and "stylesheet" not in html:
+            html = html.replace("</head>", f'  <link rel="stylesheet" href="styles/{style_name}.css" />\n</head>')
+        out.write_text(html, encoding="utf-8")
+        return out
+
+    def _action_build_homepage_ai(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        _ensure_homepage_prompts(cfg)
+        cmd_refresh_home_index(self.workspace, quiet=True)
+        styles = list_styles(cfg.styles_dir)
+
+        use_existing = self._choose_from_list(
+            "主页样式：是否采用已有样式？",
+            [("是，采用已有样式", "yes"), ("否，先自定义生成一个样式", "no")],
+            default_idx=0,
+        )
+        if use_existing is None:
+            return
+
+        chosen_style: str | None = None
+        if use_existing == "yes":
+            style_items = [("不使用样式（纯 HTML）", "__none__")] + [
+                (f"{n} [来源: {p.relative_to(self.workspace)}]", n)
+                for n, p in styles.items()
+            ]
+            picked = self._choose_from_list(
+                "选择要用于主页的样式", style_items, default_idx=0
+            )
+            if picked is None:
+                return
+            chosen_style = None if picked == "__none__" else picked
+        else:
+            goal = self._input_line(
+                "主页样式", "请描述主页样式要求（AI 将先生成样式）:"
+            )
+            if goal is None or not goal:
+                return
+            name = self._input_line(
+                "主页样式", "给该样式起个文件名（不带后缀）:", default="home-style"
+            )
+            if name is None or not name:
+                return
+            agent = BlogAgent(cfg)
+            css = self._run_with_busy(
+                "正在处理：AI 正在生成主页样式...", lambda: agent.generate_style(goal)
+            )
+            target = cfg.styles_dir / f"{name}.css"
+            target.write_text(css.strip() + "\n", encoding="utf-8")
+            chosen_style = name
+            self._log(f"主页样式已生成：{target.relative_to(self.workspace)}")
+
+        framework_goal = self._input_line(
+            "主页框架",
+            "请描述你希望的主页框架（布局结构、导航、索引区样式等）:",
+            default="信息密度高，左侧分类导航，右侧文章索引",
+        )
+        if framework_goal is None or not framework_goal:
+            return
+
+        style_text = self._input_line(
+            "建立网站主页（使用AI）",
+            "请描述你希望的主页目录样式（如：按分类树+时间倒序）:",
+            default="按分类分组并按创建时间倒序",
+        )
+        if style_text is None or not style_text:
+            return
+        index_path = self.workspace / "index.json"
+        posts_json = index_path.read_text(encoding="utf-8")
+        fields_prompt = (
+            cfg.prompts_dir / "homepage-index-fields.prompt.txt"
+        ).read_text(encoding="utf-8")
+        agent = BlogAgent(cfg)
+
+        html = self._run_with_busy(
+            "正在处理：AI 正在构建主页索引...",
+            lambda: agent.generate_homepage(
+                posts_json=posts_json,
+                directory_style=style_text,
+                index_fields_prompt=fields_prompt,
+                framework_goal=framework_goal,
+                style_name=chosen_style,
+            ),
+        )
+        if chosen_style and "stylesheet" not in html:
+            html = html.replace(
+                "</head>",
+                f'  <link rel="stylesheet" href="styles/{chosen_style}.css" />\n</head>',
+            )
+        while True:
+            preview = cfg.previews_dir / "homepage-candidate.html"
+            cfg.previews_dir.mkdir(parents=True, exist_ok=True)
+            preview.write_text(html, encoding="utf-8")
+            try:
+                webbrowser.open(preview.resolve().as_uri())
+            except Exception:
+                pass
+
+            decision = self._choose_from_list(
+                "主页预览完成：是否接受？",
+                [
+                    ("接受并保存主页", "accept"),
+                    ("继续修改一轮", "revise"),
+                    ("取消，不保存", "cancel"),
+                ],
+                default_idx=0,
+            )
+            if decision is None or decision == "cancel":
+                self._show_message("已取消", ["主页未保存。"])
+                return
+            if decision == "accept":
+                break
+            feedback = self._input_line("修改主页", "告诉 AI 你希望改哪些地方:")
+            if feedback is None or not feedback:
+                continue
+            html = self._run_with_busy(
+                "正在处理：AI 正在修改主页...",
+                lambda: agent.refine_homepage(
+                    posts_json=posts_json,
+                    directory_style=style_text,
+                    index_fields_prompt=fields_prompt,
+                    framework_goal=framework_goal,
+                    current_html=html,
+                    feedback=feedback,
+                    style_name=chosen_style,
+                ),
+            )
+            if chosen_style and "stylesheet" not in html:
+                html = html.replace(
+                    "</head>",
+                    f'  <link rel="stylesheet" href="styles/{chosen_style}.css" />\n</head>',
+                )
+        cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        home = cfg.output_dir / "index.html"
+        home.write_text(html, encoding="utf-8")
+        self._log("AI 更新主页索引完成")
+        self._show_message(
+            "主页已更新",
+            [
+                f"已生成: {home.relative_to(self.workspace)}",
+                "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
+                f"索引字段提示词: {(cfg.prompts_dir / 'homepage-index-fields.prompt.txt').relative_to(self.workspace)}",
+                (
+                    f"主页样式: styles/{chosen_style}.css"
+                    if chosen_style
+                    else "主页样式: 未使用"
+                ),
+            ],
+        )
+
+    def _open_after_create(
+        self, cfg: BlogConfig, action: str, article_file: Path, draft_dir: Path
+    ) -> None:
+        try:
+            if action in {"editor", "both"}:
+                self._run_external(cfg.default_editor, article_file, wait=True)
+                self._log(f"打开编辑器：{article_file.name}")
+            if action in {"manager", "both"}:
+                self._run_external(cfg.default_file_manager, draft_dir, wait=False)
+                self._log(f"打开文件管理器：{draft_dir.relative_to(self.workspace)}")
+        except Exception as exc:
+            self._show_message("打开外部工具失败", [str(exc)])
+
+    def _run_external(self, command: str, target: Path, wait: bool) -> None:
+        cmd = command.strip() or (
+            _default_editor_cmd() if wait else _default_file_manager_cmd()
+        )
+        curses.def_prog_mode()
+        curses.endwin()
+        try:
+            _run_open_command(cmd, target, wait=wait)
+            if wait:
+                input("\n已从编辑器返回，按回车继续...")
+        finally:
+            curses.reset_prog_mode()
+            self.stdscr.refresh()
+
+    def _action_submit(self) -> None:
+        if not self._ensure_ready():
+            return
+        message = self._input_line(
+            "保存更新", "写一句本次更新说明:", default="更新博客内容"
+        )
+        if message is None or not message:
+            return
+        change_page = self._run_with_busy(
+            "正在处理：生成网页并提交更新...",
+            lambda: cmd_submit(
+                self.workspace, message, no_open=self.no_browser, quiet=True
+            ),
+        )
+        self._log(f"保存并提交更新：{message}")
+        self._log(f"更新摘要页：{change_page.name}")
+        self._show_message("保存完成", [f"更新摘要页：{change_page}"])
+
+    def _action_set_theme(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        styles = list_styles(cfg.styles_dir)
+        frames = list_frameworks(cfg.frameworks_dir)
+
+        style_items = [
+            (f"{name}  [来源: {path.relative_to(self.workspace)}]", name)
+            for name, path in styles.items()
+        ]
+        frame_items = [
+            (
+                f"{name}（一个 HTML 布局模板等内容） [来源: {path.relative_to(self.workspace)}]",
+                name,
+            )
+            for name, path in frames.items()
+        ]
+        style_default = (
+            [v for _, v in style_items].index(cfg.selected_style) if style_items else 0
+        )
+        frame_default = (
+            [v for _, v in frame_items].index(cfg.selected_framework)
+            if frame_items
+            else 0
+        )
+
+        style = self._choose_from_list(
+            "换一个页面风格：选择样式（只影响后续页面）", style_items, style_default
+        )
+        if style is None:
+            return
+        frame = self._choose_from_list(
+            "换一个页面风格：选择框架（只影响后续页面）", frame_items, frame_default
+        )
+        if frame is None:
+            return
+
+        cmd_set_theme(self.workspace, style=style, framework=frame, quiet=True)
+        self._log(f"更新默认样式/框架：{style} / {frame}")
+        self._show_message(
+            "默认风格已更新",
+            ["只影响之后新生成的页面。", f"样式：{style}", f"框架：{frame}"],
+        )
+
+    def _action_add_style(self) -> None:
+        if not self._ensure_ready():
+            return
+        name = self._input_line("导入样式", "给新样式起个名字:")
+        if name is None or not name:
+            return
+        css_path = self._input_line("导入样式", "输入 .css 文件路径:")
+        if css_path is None or not css_path:
+            return
+
+        source = Path(css_path).expanduser().resolve()
+        if not source.exists():
+            self._show_message("文件不存在", [str(source)])
+            return
+        target = cmd_add_style(self.workspace, name, source, quiet=True)
+        self._log(f"导入样式：{name}")
+        self._show_message("导入完成", [str(target.relative_to(self.workspace))])
+
+    def _action_query_blogs(self) -> None:
+        if not self._ensure_ready():
+            return
+        posts = list_existing_blogs(self.workspace)
+        if not posts:
+            self._show_message("还没有已登记博客", ["先用 [2] 新建文章草稿。"])
+            return
+
+        lines = []
+        for p in posts:
+            slug = p.get("slug", "-")
+            category = p.get("category", "-")
+            draft = p.get("draft_dir", "-")
+            lines.append(f"[{category}] {slug} -> {draft}")
+        self._show_message(
+            "已有博客列表", lines[:20] + (["..."] if len(lines) > 20 else [])
+        )
+
+    def _action_ai_generate_assets(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        kind = self._choose_from_list(
+            "AI 生成：选择类型",
+            [("生成样式（CSS）", "style"), ("生成框架（HTML 模板）", "framework")],
+            default_idx=0,
+        )
+        if kind is None:
+            return
+
+        goal = self._input_line("AI 生成", "描述你想要的风格/布局目标:")
+        if goal is None or not goal:
+            return
+        name = self._input_line("AI 生成", "给生成结果起个文件名（不带后缀）:")
+        if name is None or not name:
+            return
+
+        agent = BlogAgent(cfg)
+        try:
+            if kind == "style":
+                content = self._run_with_busy(
+                    "正在调用 AI 生成样式...", lambda: agent.generate_style(goal)
+                )
+                target = cfg.styles_dir / f"{name}.css"
+            else:
+                content = self._run_with_busy(
+                    "正在调用 AI 生成框架...", lambda: agent.generate_framework(goal)
+                )
+                target = cfg.frameworks_dir / f"{name}.html"
+
+            while True:
+                preview_path = self._write_temp_preview(cfg, kind, name, content)
+                try:
+                    webbrowser.open(preview_path.resolve().as_uri())
+                except Exception:
+                    pass
+                decision = self._choose_from_list(
+                    "生成完成：你想怎么做？",
+                    [
+                        ("满意，保存", "save"),
+                        ("不满意，继续修改一轮", "revise"),
+                        ("放弃本次生成", "drop"),
+                    ],
+                    default_idx=0,
+                )
+                if decision is None or decision == "drop":
+                    self._show_message("已取消", ["本次生成未保存。"])
+                    return
+                if decision == "save":
+                    break
+                feedback = self._input_line("继续修改", "告诉 AI 你希望改哪里:")
+                if feedback is None or not feedback:
+                    continue
+                content = self._run_with_busy(
+                    "正在根据反馈重新生成...",
+                    lambda: agent.refine_asset(kind, content, feedback),
+                )
+
+            target.write_text(content.strip() + "\n", encoding="utf-8")
+            self._log(f"AI 生成{kind}: {target.relative_to(self.workspace)}")
+            self._open_generated_preview(cfg, kind, target)
+            self._show_message(
+                "生成完成",
+                [
+                    f"已写入: {target.relative_to(self.workspace)}",
+                    "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
+                ],
+            )
+        except Exception as exc:
+            self._show_message("生成失败", [str(exc)])
+
+    def _action_edit_template_file(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+
+        which = self._choose_from_list(
+            "打开模板目录并编辑：选择类型",
+            [
+                (
+                    f"样式文件（来源目录: {cfg.styles_dir.relative_to(self.workspace)}）",
+                    "style",
+                ),
+                (
+                    f"框架文件（一个 HTML 布局模板等内容，来源目录: {cfg.frameworks_dir.relative_to(self.workspace)}）",
+                    "framework",
+                ),
+            ],
+        )
+        if which is None:
+            return
+
+        if which == "style":
+            entries = list_styles(cfg.styles_dir)
+        else:
+            entries = list_frameworks(cfg.frameworks_dir)
+
+        items = [
+            (f"{name} [来源: {path.relative_to(self.workspace)}]", str(path))
+            for name, path in entries.items()
+        ]
+        picked = self._choose_from_list("选择要修改的文件", items)
+        if picked is None:
+            return
+
+        target = Path(picked)
+        self._run_external(cfg.default_editor, target, wait=True)
+        self._log(f"编辑模板文件：{target.relative_to(self.workspace)}")
+        self._show_message("已打开编辑器", [str(target.relative_to(self.workspace))])
+
+    def _show_sync_placeholder(self) -> None:
+        choice = self._choose_from_list(
+            "选择要同步的内容（待实现）",
+            [
+                ("1. 样式", "style"),
+                ("2. 框架", "framework"),
+                ("3. 我都要", "both"),
+            ],
+        )
+        if choice is None:
+            return
+        self._show_message(
+            "待实现",
+            [f"你选择了：{choice}", "该功能已保留入口，后续再接入真正同步逻辑。"],
+        )
+
+    def _run_with_busy(self, title: str, fn):
+        state = {"done": False, "result": None, "error": None}
+        started = time.time()
+
+        def _target():
+            try:
+                state["result"] = fn()
+            except Exception as exc:
+                state["error"] = exc
+            finally:
+                state["done"] = True
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        step = 0
+        while not state["done"]:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(8, 4, title, self.c_purple)
+            width = 42
+            filled = step % (width + 1)
+            bar = "█" * filled + "·" * (width - filled)
+            self._safe_addstr(10, 4, f"[{bar}]", self.c_blue)
+            self._safe_addstr(12, 4, "正在处理...请稍候", self.c_text)
+            if time.time() - started >= 60:
+                self._safe_addstr(13, 4, "AI生成速度可能较慢，请耐心等待", self.c_red)
+            self._draw_footer()
+            self.stdscr.refresh()
+            time.sleep(0.06)
+            step += 1
+        t.join()
+        if state["error"] is not None:
+            raise state["error"]
+        return state["result"]
+
+    def _open_generated_preview(self, cfg: BlogConfig, kind: str, target: Path) -> None:
+        cfg.previews_dir.mkdir(parents=True, exist_ok=True)
+        if kind == "style":
+            example = cfg.frameworks_dir / "example.html"
+            if not example.exists():
+                write_preview(cfg, open_preview=False)
+            tpl = (cfg.frameworks_dir / "example.html").read_text(encoding="utf-8")
+            preview = cfg.previews_dir / f"generated-style-{target.stem}.html"
+            preview.write_text(
+                tpl.format(
+                    title=f"样式预览 {target.stem}",
+                    blog_name="Generated Style",
+                    subtitle="AI 生成样式预览",
+                    date="today",
+                    content_html=(
+                        "<p>这是自动预览页面。</p>"
+                        "<p>如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。</p>"
+                    ),
+                    style_href="../content/styles/" + target.name,
+                ),
+                encoding="utf-8",
+            )
+            webbrowser.open(preview.resolve().as_uri())
+            return
+
+        tpl = target.read_text(encoding="utf-8")
+        preview = cfg.previews_dir / f"generated-framework-{target.stem}.html"
+        rendered = tpl.format(
+            title=f"框架预览 {target.stem}",
+            blog_name="Generated Framework",
+            subtitle="本html没有使用任何样式(css)",
+            date="today",
+            content_html="<p>这是自动预览页面。</p>",
+            style_href="",
+        ).replace('<link rel="stylesheet" href="" />', "")
+        rendered = rendered.replace(
+            "</body>", "<p style='padding:16px;'>本html没有使用任何样式(css)</p></body>"
+        )
+        preview.write_text(rendered, encoding="utf-8")
+        webbrowser.open(preview.resolve().as_uri())
+
+    def _write_temp_preview(
+        self, cfg: BlogConfig, kind: str, name: str, content: str
+    ) -> Path:
+        cfg.previews_dir.mkdir(parents=True, exist_ok=True)
+        if kind == "style":
+            css_path = cfg.previews_dir / f"tmp-{name}.css"
+            css_path.write_text(content.strip() + "\n", encoding="utf-8")
+            example = cfg.frameworks_dir / "example.html"
+            if not example.exists():
+                write_preview(cfg, open_preview=False)
+            tpl = example.read_text(encoding="utf-8")
+            preview = cfg.previews_dir / f"tmp-style-{name}.html"
+            preview.write_text(
+                tpl.format(
+                    title=f"临时样式预览 {name}",
+                    blog_name="Preview",
+                    subtitle="未保存版本",
+                    date="today",
+                    content_html=(
+                        "<p>这是未保存预览。</p>"
+                        "<p>如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。</p>"
+                    ),
+                    style_href=css_path.name,
+                ),
+                encoding="utf-8",
+            )
+            return preview
+
+        preview = cfg.previews_dir / f"tmp-framework-{name}.html"
+        rendered = content.replace('<link rel="stylesheet" href="{style_href}" />', "")
+        rendered = rendered.replace(
+            "</body>", "<p style='padding:16px;'>本html没有使用任何样式(css)</p></body>"
+        )
+        preview.write_text(
+            rendered.format(
+                title=f"临时框架预览 {name}",
+                blog_name="Preview",
+                subtitle="未保存版本",
+                date="today",
+                content_html="<p>这是未保存预览。</p>",
+                style_href="",
+            ),
+            encoding="utf-8",
+        )
+        return preview
+
+    def _show_logs(self) -> None:
+        if not self.logs:
+            self._show_message(
+                "动作日志", ["暂无记录", "执行一次操作后可在此查看概要。"]
+            )
+            return
+
+        pos = 0
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(
+                6, 2, "动作日志（只展示做了什么，不展示文件细节）", self.c_purple
+            )
+
+            h, _ = self.stdscr.getmaxyx()
+            visible = max(4, h - 13)
+            window = self.logs[
+                max(0, len(self.logs) - visible - pos) : len(self.logs) - pos
+            ]
+            for i, line in enumerate(window):
+                self._safe_addstr(8 + i, 4, f"- {line}", self.c_text)
+
+            self._safe_addstr(h - 5, 2, "j/k 滚动, q 返回", self.c_text)
+            self._draw_footer()
+            self.stdscr.refresh()
+            key = self.stdscr.getch()
+            if key == ord("q"):
+                return
+            if key in (ord("j"), curses.KEY_DOWN):
+                pos = min(len(self.logs), pos + 1)
+            if key in (ord("k"), curses.KEY_UP):
+                pos = max(0, pos - 1)
+            if key == ord("?"):
+                self._show_help()
+            if key == ord(":") and self._command_palette():
+                return
+
+    def _command_palette(self) -> bool:
+        cmd = self._input_line("命令模式", "输入命令（:logs / :q）:", default="")
+        if cmd is None:
+            return False
+        command = cmd.strip().lstrip(":")
+        if command == "logs":
+            self._show_logs()
+            return True
+        if command in {"q", "quit", "exit"}:
+            self.running = False
+            return True
+        self._show_message("未知命令", [f":{command}", "可用命令: :logs, :q"])
+        return False
+
+    def _show_help(self) -> None:
+        self._show_message(
+            "键位帮助",
+            [
+                "j/k 或 ↑/↓: 在列表中移动",
+                "Enter: 确认当前操作",
+                "1~9: 直达对应编号菜单",
+                "q: 返回上一页（主菜单下 q 退出）",
+                "?: 打开帮助",
+                ":logs: 打开动作日志",
+                "Ctrl+Z: 暂停程序，fg 恢复运行",
+            ],
+        )
+
+    def _ensure_ready(self) -> bool:
+        if (self.workspace / "blogauto.json").exists():
+            return True
+        self._show_message(
+            "还没完成一键准备", ["请先执行菜单 [1] 第一次使用：一键准备"]
+        )
+        return False
+
+    def _log(self, text: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        self.logs.append(f"[{stamp}] {text}")
+        if len(self.logs) > 300:
+            self.logs = self.logs[-300:]
+
+    def _draw_box(self, y: int, x: int, h: int, title: str) -> None:
+        _, w = self.stdscr.getmaxyx()
+        width = max(20, w - x - 3)
+        if y + h >= self.stdscr.getmaxyx()[0]:
+            return
+        self._safe_addstr(y, x, "╭" + "─" * (width - 2) + "╮", self.c_blue)
+        self._safe_addstr(
+            y + 1, x, "│ " + title[: width - 4].ljust(width - 4) + " │", self.c_purple
+        )
+        for i in range(2, h - 1):
+            self._safe_addstr(y + i, x, "│" + " " * (width - 2) + "│", self.c_blue)
+        self._safe_addstr(y + h - 1, x, "╰" + "─" * (width - 2) + "╯", self.c_blue)
+
+    def _safe_addstr(self, y: int, x: int, text: str, style: int = 0) -> None:
+        h, w = self.stdscr.getmaxyx()
+        if y < 0 or y >= h:
+            return
+        if x < 0:
+            x = 0
+        room = w - x - 1
+        if room <= 0:
+            return
+        try:
+            self.stdscr.addstr(y, x, text[:room], style)
+        except curses.error:
+            pass
+
+
+def run_tui(workspace: Path, no_browser: bool) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("错误: 交互式 TUI 需要在终端中运行")
+        return 2
+
+    def _wrapped(stdscr: curses.window) -> int:
+        app = VimTUIApp(stdscr, workspace, no_browser)
+        return app.run()
+
+    return curses.wrapper(_wrapped)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="AIBlogAuto（Vim 风格全屏 TUI）")
+    parser.add_argument(
+        "--workspace",
+        default=str(Path.cwd() / "my_blog"),
+        help="工作目录，默认 ./my_blog",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="禁用自动打开浏览器预览",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    workspace = Path(args.workspace).expanduser().resolve()
+
+    if shutil.which("git") is None:
+        print("警告: 未检测到 git，提交功能将不可用")
+
+    try:
+        return run_tui(workspace, no_browser=args.no_browser)
+    except KeyboardInterrupt:
+        print("\n已取消")
+        return 130
+    except Exception as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
