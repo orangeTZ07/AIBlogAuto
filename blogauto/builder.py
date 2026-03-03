@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import os
 
 from .agent import BlogAgent
 from .config import BlogConfig
@@ -35,7 +36,8 @@ class BlogBuilder:
             raw_text = post_txt.read_text(encoding="utf-8")
             post = self.agent.process(raw_text)
 
-            out_dir = self.config.output_dir / "posts" / slug
+            page_url = self._resolve_page_url(slug, post_txt, meta)
+            out_dir = self.config.output_dir / Path(page_url).parent
             out_dir.mkdir(parents=True, exist_ok=True)
 
             style_name = meta.get("style", "__default__")
@@ -46,7 +48,9 @@ class BlogBuilder:
                 frame_name = self.config.selected_framework
 
             template = frameworks[frame_name].read_text(encoding="utf-8")
-            style_href = "../../styles/" + f"{style_name}.css"
+            style_href = os.path.relpath(
+                self.config.styles_dir / f"{style_name}.css", out_dir
+            ).replace("\\", "/")
             rendered = template.format(
                 title=post.title,
                 blog_name="AI Blog",
@@ -57,7 +61,7 @@ class BlogBuilder:
             )
             (out_dir / "index.html").write_text(rendered, encoding="utf-8")
             generated.append(slug)
-            entries.append((slug, post.title, post.publish_date))
+            entries.append((page_url, post.title, post.publish_date))
 
         self._write_home(entries)
         self._write_manifest(generated)
@@ -65,8 +69,8 @@ class BlogBuilder:
 
     def _write_home(self, entries: list[tuple[str, str, str]]) -> None:
         rows = "\n".join(
-            f'<li><a href="posts/{slug}/index.html">{title}</a> <small>{date}</small></li>'
-            for slug, title, date in entries
+            f'<li><a href="{page_url}">{title}</a> <small>{date}</small></li>'
+            for page_url, title, date in entries
         )
         home = f"""<!doctype html>
 <html lang="zh-CN">
@@ -102,6 +106,20 @@ class BlogBuilder:
     def _ensure_dirs(self) -> None:
         self.config.content_dir.mkdir(parents=True, exist_ok=True)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_page_url(self, slug: str, post_txt: Path, meta: dict[str, str]) -> str:
+        page_url = str(meta.get("page_url", "")).strip().lstrip("/")
+        if page_url.endswith("/index.html"):
+            page_path = Path(page_url)
+            if not page_path.is_absolute() and ".." not in page_path.parts:
+                return page_path.as_posix()
+        try:
+            rel_dir = post_txt.parent.resolve().relative_to(self.config.content_dir.resolve())
+            if rel_dir.parts:
+                return (rel_dir / "index.html").as_posix()
+        except Exception:
+            pass
+        return f"{slug}/index.html"
 
     def _discover_posts(self) -> list[tuple[str, Path, dict[str, str]]]:
         root_index = self.config.workspace / "index.json"

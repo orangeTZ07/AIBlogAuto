@@ -123,6 +123,36 @@ def _upsert_index_entry(workspace: Path, entry: dict[str, str]) -> None:
     )
 
 
+def _infer_page_url_for_entry(
+    workspace: Path, content_dir: Path, entry: dict[str, str]
+) -> str:
+    article_file = str(entry.get("article_file", "")).strip()
+    draft_dir = str(entry.get("draft_dir", "")).strip()
+    existing = str(entry.get("page_url", "")).strip()
+    slug = str(entry.get("slug", "")).strip() or "custom"
+
+    def _to_content_relative(path: Path) -> str | None:
+        try:
+            rel = path.relative_to(content_dir)
+            if not rel.parts:
+                return None
+            return (rel / "index.html").as_posix()
+        except Exception:
+            return None
+
+    if article_file and article_file != "Custom":
+        rel = _to_content_relative((workspace / article_file).resolve().parent)
+        if rel:
+            return rel
+    if draft_dir and draft_dir != "Custom":
+        rel = _to_content_relative((workspace / draft_dir).resolve())
+        if rel:
+            return rel
+    if existing and existing.endswith("/index.html"):
+        return existing.lstrip("/")
+    return f"{slug}/index.html"
+
+
 def init_workspace(
     workspace: Path,
     open_preview: bool = True,
@@ -298,7 +328,7 @@ def seed_example(cfg: BlogConfig) -> None:
             "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
             "article_file": str(article.relative_to(cfg.workspace)),
             "prompt_file": str(prompt_file.relative_to(cfg.workspace)),
-            "page_url": "posts/welcome/index.html",
+            "page_url": "welcome/index.html",
             "style": "__default__",
             "framework": "__default__",
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -499,7 +529,7 @@ def cmd_new_post(
             "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
             "article_file": str(article.relative_to(cfg.workspace)),
             "prompt_file": str(prompt_file.relative_to(cfg.workspace)),
-            "page_url": f"posts/{slug}/index.html",
+            "page_url": f"{relative}/index.html",
             "style": style_choice,
             "framework": framework_choice,
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -529,6 +559,7 @@ def list_existing_blogs(workspace: Path) -> list[dict[str, str]]:
 
 
 def cmd_refresh_home_index(workspace: Path, quiet: bool = False) -> Path:
+    cfg = load_config(workspace)
     index_path = workspace / "index.json"
     if not index_path.exists():
         raise FileNotFoundError("未找到 index.json，先创建文章草稿。")
@@ -538,7 +569,9 @@ def cmd_refresh_home_index(workspace: Path, quiet: bool = False) -> Path:
         slug = str(item.get("slug", "")).strip()
         if not slug:
             continue
-        item["page_url"] = f"posts/{slug}/index.html"
+        item["page_url"] = _infer_page_url_for_entry(
+            workspace, cfg.content_dir.resolve(), item
+        )
         item["category"] = item.get("category") or "default"
         item["style"] = item.get("style") or "__default__"
         item["framework"] = item.get("framework") or "__default__"
@@ -597,7 +630,39 @@ def cmd_rescan_content_to_index(
     cfg = load_config(workspace)
     index_path = workspace / "index.json"
     data = _read_index_data(index_path)
-    posts = [p for p in data.get("posts", []) if isinstance(p, dict)]
+
+    def _norm_key(value: str) -> str:
+        return value.strip().replace("\\", "/").lstrip("./")
+
+    def _usable(value: str) -> bool:
+        v = value.strip()
+        return bool(v) and v != "Custom"
+
+    raw_posts = [p for p in data.get("posts", []) if isinstance(p, dict)]
+    posts: list[dict] = []
+    known_article_files: set[str] = set()
+    known_draft_dirs: set[str] = set()
+    known_page_urls: set[str] = set()
+
+    # 清理 index.json 中已存在的重复项：同 article_file/draft_dir/page_url 视为同一篇。
+    for p in raw_posts:
+        article_key = _norm_key(str(p.get("article_file", "")))
+        draft_key = _norm_key(str(p.get("draft_dir", "")))
+        page_key = _norm_key(str(p.get("page_url", "")))
+        if _usable(article_key) and article_key in known_article_files:
+            continue
+        if _usable(draft_key) and draft_key in known_draft_dirs:
+            continue
+        if _usable(page_key) and page_key in known_page_urls:
+            continue
+        posts.append(p)
+        if _usable(article_key):
+            known_article_files.add(article_key)
+        if _usable(draft_key):
+            known_draft_dirs.add(draft_key)
+        if _usable(page_key):
+            known_page_urls.add(page_key)
+
     used_slugs = {str(p.get("slug", "")).strip() for p in posts if p.get("slug")}
     added = 0
 
@@ -606,10 +671,25 @@ def cmd_rescan_content_to_index(
         slug = str(entry.get("slug", "")).strip()
         if not slug:
             slug = "custom"
+        article_key = _norm_key(str(entry.get("article_file", "")))
+        draft_key = _norm_key(str(entry.get("draft_dir", "")))
+        page_key = _norm_key(str(entry.get("page_url", "")))
+        if article_key and article_key in known_article_files:
+            return
+        if draft_key and draft_key in known_draft_dirs:
+            return
+        if page_key and page_key in known_page_urls:
+            return
         if any(str(p.get("slug", "")).strip() == slug for p in posts):
             return
         entry["slug"] = _ensure_unique_slug(slug, used_slugs)
         posts.append(entry)
+        if _usable(article_key):
+            known_article_files.add(article_key)
+        if _usable(draft_key):
+            known_draft_dirs.add(draft_key)
+        if _usable(page_key):
+            known_page_urls.add(page_key)
         added += 1
 
     # 1) 草稿文件扫描：my_blog/myblog/post
@@ -630,7 +710,7 @@ def cmd_rescan_content_to_index(
                 "prompt_file": str((file.parent / "prompt.txt").relative_to(workspace))
                 if (file.parent / "prompt.txt").exists()
                 else "Custom",
-                "page_url": f"posts/{slug_guess}/index.html",
+                "page_url": str(file.parent.relative_to(cfg.content_dir) / "index.html"),
                 "style": "Custom",
                 "framework": "Custom",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1309,7 +1389,7 @@ class VimTUIApp:
             "主页索引更新完成",
             [
                 f"索引文件: {index_path.relative_to(self.workspace)}",
-                "每篇文章已确保包含 page_url=posts/<slug>/index.html",
+                "每篇文章已确保包含 page_url=<文章目录>/index.html",
                 f"AI 已同步更新主页: {home_path.relative_to(self.workspace)}",
                 f"本次更新条目数: {len(changed)}",
                 "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
