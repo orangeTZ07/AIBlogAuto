@@ -329,7 +329,9 @@ def _ensure_homepage_prompts(cfg: BlogConfig) -> None:
         p_style.write_text("按分类分组并按创建时间倒序", encoding="utf-8")
     p_framework = cfg.prompts_dir / "homepage-framework.prompt.txt"
     if not p_framework.exists():
-        p_framework.write_text("信息密度高，左侧分类导航，右侧文章索引", encoding="utf-8")
+        p_framework.write_text(
+            "信息密度高，左侧分类导航，右侧文章索引", encoding="utf-8"
+        )
 
 
 def cmd_build_homepage_with_ai(
@@ -562,7 +564,9 @@ def _read_index_data(index_path: Path) -> dict:
 
 
 def _changed_posts(before: dict, after: dict) -> list[dict]:
-    before_map = {str(x.get("slug", "")): x for x in before.get("posts", []) if x.get("slug")}
+    before_map = {
+        str(x.get("slug", "")): x for x in before.get("posts", []) if x.get("slug")
+    }
     changed: list[dict] = []
     for item in after.get("posts", []):
         slug = str(item.get("slug", ""))
@@ -587,7 +591,9 @@ def _ensure_unique_slug(slug: str, used: set[str]) -> str:
         i += 1
 
 
-def cmd_rescan_content_to_index(workspace: Path, quiet: bool = False) -> tuple[Path, int]:
+def cmd_rescan_content_to_index(
+    workspace: Path, quiet: bool = False
+) -> tuple[Path, int]:
     cfg = load_config(workspace)
     index_path = workspace / "index.json"
     data = _read_index_data(index_path)
@@ -655,7 +661,9 @@ def cmd_rescan_content_to_index(workspace: Path, quiet: bool = False) -> tuple[P
         )
 
     data["posts"] = sorted(posts, key=lambda x: str(x.get("slug", "")))
-    index_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    index_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     if not quiet:
         print(f"扫描完成: {index_path}, 新增 {added} 条")
     return index_path, added
@@ -681,13 +689,13 @@ class VimTUIApp:
             MenuItem("init", "第一次使用：一键准备", "自动完成目录与基础设置。"),
             MenuItem(
                 "refresh_index",
-                "一键生成网页",
-                "更新网站主页文章索引，确保每篇文章都准确指向 index.html。",
+                "一键更新主页",
+                "更新网站主页文章索引，将新文章直接嵌入主页，同时确保每篇文章都准确指向 index.html。",
             ),
             MenuItem(
                 "rescan_content",
-                "迁移扫描 content",
-                "快速扫描 content 并同步到 index.json，未定义字段自动写为 Custom。",
+                "迁移扫描",
+                "快速扫描 my_blog/content/ 并同步到 index.json，未定义字段自动写为 Custom。",
             ),
             MenuItem(
                 "build_home",
@@ -710,12 +718,12 @@ class VimTUIApp:
                 "用内置 AI 生成样式/框架",
                 "交互式输入目标后，自动生成并保存模板文件。",
             ),
-            MenuItem(
-                "sync_pending",
-                "一键同步样式和框架（待实现）",
-                "预留入口：后续支持一键拉取并同步模板资源。",
-                enabled=False,
-            ),
+            # MenuItem(
+            #     "sync_pending",
+            #     "一键同步样式和框架（待实现）",
+            #     "预留入口：后续支持一键拉取并同步模板资源。",
+            #     enabled=False,
+            # ),
             MenuItem(
                 "edit_template",
                 "打开模板目录并编辑文件",
@@ -1325,11 +1333,19 @@ class VimTUIApp:
             ],
         )
 
-    def _apply_index_updates_to_home(self, cfg: BlogConfig, after: dict, changed: list[dict]) -> Path:
+    def _apply_index_updates_to_home(
+        self, cfg: BlogConfig, after: dict, changed: list[dict]
+    ) -> Path:
         agent = BlogAgent(cfg)
-        fields_prompt = (cfg.prompts_dir / "homepage-index-fields.prompt.txt").read_text(encoding="utf-8")
-        directory_style = (cfg.prompts_dir / "homepage-directory-style.prompt.txt").read_text(encoding="utf-8")
-        framework_goal = (cfg.prompts_dir / "homepage-framework.prompt.txt").read_text(encoding="utf-8")
+        fields_prompt = (
+            cfg.prompts_dir / "homepage-index-fields.prompt.txt"
+        ).read_text(encoding="utf-8")
+        directory_style = (
+            cfg.prompts_dir / "homepage-directory-style.prompt.txt"
+        ).read_text(encoding="utf-8")
+        framework_goal = (cfg.prompts_dir / "homepage-framework.prompt.txt").read_text(
+            encoding="utf-8"
+        )
 
         posts_json = json.dumps(after, ensure_ascii=False, indent=2)
         style_name = cfg.selected_style
@@ -1360,7 +1376,10 @@ class VimTUIApp:
                 style_name=style_name,
             )
         if style_name and "stylesheet" not in html:
-            html = html.replace("</head>", f'  <link rel="stylesheet" href="styles/{style_name}.css" />\n</head>')
+            html = html.replace(
+                "</head>",
+                f'  <link rel="stylesheet" href="styles/{style_name}.css" />\n</head>',
+            )
         out.write_text(html, encoding="utf-8")
         return out
 
