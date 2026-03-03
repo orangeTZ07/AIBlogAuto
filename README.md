@@ -3,21 +3,22 @@
 以 AI 为特色的模块化博客生成器（Python + DeepSeek API），现代化全屏 TUI。
 ![项目截图](./screenshot/AIBlogAuto.png "界面预览")
 
+![产出截图](./screenshot/demo_AIBlogAuto.png "产出预览")
+
 ## 特性
 
-- AI Agent: 自动生成博客
-- 霓虹粉风格界面：现代分区布局 + 高亮焦点。
-- 霓虹紫蓝红主题：全屏刷新、状态栏、焦点注解。
-- Vim 风格：`j/k` 导航、`q` 返回上一页、`?` 查看帮助。
-- 一键准备支持 AI 服务商设置：DeepSeek / OpenAI 兼容 / Anthropic / 自定义兼容接口。
-- 样式/框架模块化：统一存放在工作目录并复用，不重复复制。
-- Prompt 模板：自动生成 `prompts/*.prompt.txt` 供 Codex/Claude/Copilot 使用。
-- 提交流程：扫描内容目录维护主页文章页，并可生成变动目录页面。
+- 现代化高颜值TUI
+- AI为主题的静态博客站生成/管理工具
+- vim操作模式
+- 支持多家openai兼容格式的API,默认使用DeepSeek
+- 模块化cli，高度可定制化
 
 ## 安装
 
 ```bash
-bash scripts/install.sh
+git clone https://github.com/orangeTZ07/AIBlogAuto.git \
+&& cd AIBlogAuto \
+&& bash scripts/install.sh
 ```
 
 ## 运行
@@ -85,7 +86,7 @@ export DEEPSEEK_API_KEY="your_key_here"
 TUI 使用 Nerd Font 图标（如 `JetBrainsMono Nerd Font`）。
 
 - 下载地址: <https://www.nerdfonts.com/font-downloads>
-- 将终端字体切换为 Nerd Font 后可获得完整图标显示。
+- 将终端字体切换为 Nerd Font 后可获得完整图标显示。(这里不会的可以问问AI)
 
 ## 目录结构（初始化后）
 
@@ -98,6 +99,27 @@ TUI 使用 Nerd Font 图标（如 `JetBrainsMono Nerd Font`）。
 - `content/index.html`: 网站主页（静态站点根）
 - `changes/changes-*.html`: 提交后变动目录页
 
+## 简易教程
+
+将本程序放在你所期望的目录下(这里假设你没有使用参数进行启动)
+
+- 首先进行"一键准备"，配置你的默认样式、框架、内置agent等内容
+  - 如果你选择了"\[1\] 读取环境变量（推荐）"，程序将从环境变量读取API KEY。该程序不会将API KEY自动加入到你的`bashrc`等配置文件中。
+- 准备后，执行"用内置AI生成样式/框架"，获取你喜欢的样式/框架
+- 之后"生成主页（使用AI）"，获得你的博客站主界面
+- 然后"新建博客页"，创建你的文章
+  - 如果你期望更换`文章prompt`，你可以在`cli.py`中用文本搜索找到提示词所在代码块并修改
+- 如果你从前写了一些博客
+  - 你可以把博客所在目录（一篇博客占一个目录）复制到`my_blog/content/`下
+  - 然后运行"迁移扫描"，这会把你的博客页更新到`index.json`
+  - 如果你想要自定义你的博客属性，你可以找到`my_blog/index.json`，自行修改
+- 运行"查看已有博客"，判断是否成功写入文章
+- 然后进行"生成主页（使用AI）"
+- 自此你的静态博客站已生成完毕
+
 部署提示（以 GitHub Pages 为例）：
 
 - 部署网页时请将 `content/*` 放在仓库根目录。
+  - 可先在 content/ 目录下进行初始化git仓库
+  - 然后将该git仓库连接到你的github page仓库
+  - 使用本程序进行构建/修改后提交到你的仓库

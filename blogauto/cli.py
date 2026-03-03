@@ -312,7 +312,7 @@ def seed_example(cfg: BlogConfig) -> None:
 
     if not article.exists():
         article.write_text(
-            "清空本文件内容后写入你的文章（你可以在这里面向AI提出要求和注意事项）。",
+            "清空本文件内容后写入你的文章的主要内容（AI会自动扩充你的文章）（你可以在这里面向AI提出要求和注意事项）。",
             encoding="utf-8",
         )
     if not prompt_file.exists():
@@ -735,7 +735,9 @@ def cmd_rescan_content_to_index(
                 "prompt_file": str((file.parent / "prompt.txt").relative_to(workspace))
                 if (file.parent / "prompt.txt").exists()
                 else "Custom",
-                "page_url": str(file.parent.relative_to(cfg.content_dir) / "index.html"),
+                "page_url": str(
+                    file.parent.relative_to(cfg.content_dir) / "index.html"
+                ),
                 "style": "Custom",
                 "framework": "Custom",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1380,7 +1382,9 @@ class VimTUIApp:
         prompt_file = result["prompt_file"]
         self._log(f"创建草稿：{slug} -> {draft_dir.relative_to(self.workspace)}")
 
-        action = self._choose_open_action("创建完成后下一步要做什么？", include_inline_ai=True)
+        action = self._choose_open_action(
+            "创建完成后下一步要做什么？", include_inline_ai=True
+        )
         if action is None:
             action = "none"
 
@@ -1847,7 +1851,9 @@ class VimTUIApp:
         except Exception as exc:
             self._show_message("打开外部工具失败", [str(exc)])
 
-    def _resolve_post_paths(self, post: dict[str, str]) -> tuple[Path | None, Path | None]:
+    def _resolve_post_paths(
+        self, post: dict[str, str]
+    ) -> tuple[Path | None, Path | None]:
         article_text = str(post.get("article_file", "")).strip()
         draft_text = str(post.get("draft_dir", "")).strip()
         article_path: Path | None = None
@@ -1873,7 +1879,9 @@ class VimTUIApp:
             return
         cfg = load_config(self.workspace)
         current_editor = cfg.default_editor.strip() or _default_editor_cmd()
-        current_manager = cfg.default_file_manager.strip() or _default_file_manager_cmd()
+        current_manager = (
+            cfg.default_file_manager.strip() or _default_file_manager_cmd()
+        )
         choice = self._choose_from_list(
             "配置默认启动命令",
             [
