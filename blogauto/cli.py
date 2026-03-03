@@ -462,6 +462,31 @@ def cmd_set_theme(
         print("默认样式/框架已更新（只影响后续生成的页面）")
 
 
+def cmd_set_open_commands(
+    workspace: Path,
+    editor_cmd: str | None = None,
+    file_manager_cmd: str | None = None,
+    reset: bool = False,
+    quiet: bool = False,
+) -> BlogConfig:
+    cfg = load_config(workspace)
+    if reset:
+        cfg.default_editor = ""
+        cfg.default_file_manager = ""
+    if editor_cmd is not None:
+        cfg.default_editor = editor_cmd.strip()
+    if file_manager_cmd is not None:
+        cfg.default_file_manager = file_manager_cmd.strip()
+    save_config(cfg)
+    if not quiet:
+        print(
+            "默认外部工具命令已更新: "
+            f"editor={cfg.default_editor or _default_editor_cmd()} "
+            f"manager={cfg.default_file_manager or _default_file_manager_cmd()}"
+        )
+    return cfg
+
+
 def cmd_add_style(
     workspace: Path, name: str, css_file: Path, quiet: bool = False
 ) -> Path:
@@ -784,13 +809,18 @@ class VimTUIApp:
             ),
             MenuItem(
                 "new",
-                "新建文章草稿",
+                "新建博客页",
                 "创建草稿目录 + my_blog.txt + prompt.txt，并登记到 index.json。",
             ),
             MenuItem(
                 "theme",
                 "换一个页面风格",
                 "只影响之后新生成的页面，不会改动已生成页面。",
+            ),
+            MenuItem(
+                "openers",
+                "配置编辑器/文件管理器启动命令",
+                "按你的习惯设置默认命令，供新建与查看博客时复用。",
             ),
             MenuItem("query_blogs", "查看已有博客", "查看已创建博客列表及其目录位置。"),
             MenuItem(
@@ -976,7 +1006,7 @@ class VimTUIApp:
         while True:
             self.stdscr.clear()
             self._draw_header()
-            self._safe_addstr(6, 2, "草稿创建完成", self.c_purple)
+            self._safe_addstr(6, 2, "博客页创建完成", self.c_purple)
 
             self._safe_addstr(8, 4, "已生成文章模板：", self.c_text)
             relative_dir = draft_dir.relative_to(self.workspace)
@@ -1159,6 +1189,8 @@ class VimTUIApp:
             self._action_new_post()
         elif item.key == "theme":
             self._action_set_theme()
+        elif item.key == "openers":
+            self._action_config_openers()
         elif item.key == "query_blogs":
             self._action_query_blogs()
         elif item.key == "ai_generate":
@@ -1280,14 +1312,14 @@ class VimTUIApp:
     def _action_new_post(self) -> None:
         if not self._ensure_ready():
             return
-        slug = self._input_line("新建文章草稿", "给文章起个英文短名（例：test2222）:")
+        slug = self._input_line("新建博客页", "给文章起个英文短名（例：test2222）:")
         if slug is None or not slug:
             return
 
         cfg = load_config(self.workspace)
         prefix = str(cfg.content_dir.relative_to(self.workspace))
         suffix = self._input_line(
-            "新建文章草稿",
+            "新建博客页",
             f"当前统一博客目录：{prefix}/ 请输入后续目录（用 / 分层，留空用 {slug}）:",
             default=slug,
         )
@@ -1301,7 +1333,7 @@ class VimTUIApp:
         path_parts = [p for p in suffix.split("/") if p]
         default_category = path_parts[0] if path_parts else "default"
         category = self._input_line(
-            "新建文章草稿", "分类名（用于主页索引）:", default=default_category
+            "新建博客页", "分类名（用于主页索引）:", default=default_category
         )
         if category is None or not category:
             return
@@ -1348,18 +1380,13 @@ class VimTUIApp:
         prompt_file = result["prompt_file"]
         self._log(f"创建草稿：{slug} -> {draft_dir.relative_to(self.workspace)}")
 
-        action = self._choose_from_list(
-            "创建完成后要不要直接打开？",
-            [
-                ("只打开编辑器", "editor"),
-                ("只在文件管理器中显示", "manager"),
-                ("小孩子才做选择，以上都要", "both"),
-                ("先不打开", "none"),
-            ],
-        )
+        action = self._choose_open_action("创建完成后下一步要做什么？", include_inline_ai=True)
         if action is None:
             action = "none"
 
+        if action == "inline_ai":
+            self._inline_write_and_generate(slug, article_file, draft_dir)
+            return
         self._open_after_create(cfg, action, article_file, draft_dir)
         self._show_new_post_result(slug, draft_dir, article_file, prompt_file)
 
@@ -1622,6 +1649,62 @@ class VimTUIApp:
         except Exception as exc:
             self._show_message("打开外部工具失败", [str(exc)])
 
+    def _choose_open_action(
+        self, title: str, include_inline_ai: bool = False
+    ) -> str | None:
+        items = [
+            ("只打开编辑器", "editor"),
+            ("只在文件管理器中显示", "manager"),
+            ("小孩子才做选择，以上都要", "both"),
+            ("先不打开", "none"),
+        ]
+        if include_inline_ai:
+            items.insert(
+                3,
+                (
+                    "直接在本程序中输入正文(my_blog.txt)，然后由内置AI生成页面(不太建议)",
+                    "inline_ai",
+                ),
+            )
+        return self._choose_from_list(title, items)
+
+    def _inline_write_and_generate(
+        self, slug: str, article_file: Path, draft_dir: Path
+    ) -> None:
+        text = self._input_line(
+            "直接输入正文",
+            "按 i 进入输入模式，Enter 可换行；切回 NORMAL 后按 Enter 完成。",
+            default="",
+        )
+        if text is None or not text.strip():
+            self._show_message("未写入正文", ["内容为空，已取消内置 AI 生成。"])
+            return
+
+        article_file.write_text(text.strip() + "\n", encoding="utf-8")
+        summary = self._run_with_busy(
+            "正在处理：调用内置 AI 生成页面...",
+            lambda: cmd_build(self.workspace, quiet=True),
+        )
+        page = draft_dir / "index.html"
+        if page.exists() and not self.no_browser:
+            try:
+                webbrowser.open(page.resolve().as_uri())
+            except Exception:
+                pass
+        self._log(f"内置 AI 生成页面：{slug}")
+        self._show_message(
+            "页面生成完成",
+            [
+                f"正文文件: {article_file.relative_to(self.workspace)}",
+                (
+                    f"页面文件: {page.relative_to(self.workspace)}"
+                    if page.exists()
+                    else "页面文件未落在当前目录，可检查 index.json 中 page_url 配置。"
+                ),
+                f"本次构建文章数: {summary.get('generated_posts', 0)}",
+            ],
+        )
+
     def _run_external(self, command: str, target: Path, wait: bool) -> None:
         cmd = command.strip() or (
             _default_editor_cmd() if wait else _default_file_manager_cmd()
@@ -1722,17 +1805,118 @@ class VimTUIApp:
             return
         posts = list_existing_blogs(self.workspace)
         if not posts:
-            self._show_message("还没有已登记博客", ["先用 [2] 新建文章草稿。"])
+            self._show_message("还没有已登记博客", ["先用“新建博客页”创建内容。"])
             return
 
-        lines = []
-        for p in posts:
-            slug = p.get("slug", "-")
-            category = p.get("category", "-")
-            draft = p.get("draft_dir", "-")
-            lines.append(f"[{category}] {slug} -> {draft}")
+        items = []
+        for idx, p in enumerate(posts):
+            slug = str(p.get("slug", "-"))
+            category = str(p.get("category", "-"))
+            draft = str(p.get("draft_dir", "-"))
+            items.append((f"[{category}] {slug} -> {draft}", str(idx)))
+        picked = self._choose_from_list(
+            "查看已有博客：按 vim 模式选择一篇", items, default_idx=0
+        )
+        if picked is None:
+            return
+        post = posts[int(picked)]
+        cfg = load_config(self.workspace)
+        article_path, folder_path = self._resolve_post_paths(post)
+        if article_path is None and folder_path is None:
+            self._show_message("无法打开", ["该条目未记录可用路径。"])
+            return
+
+        action = self._choose_open_action(
+            "选中后要怎么打开？（编辑 my_blog.txt / 文件管理器 / 都要）",
+            include_inline_ai=False,
+        )
+        if action is None or action == "none":
+            return
+        try:
+            if action in {"editor", "both"}:
+                if article_path is None:
+                    self._show_message("未找到 my_blog.txt", ["该条目不支持编辑正文。"])
+                    return
+                self._run_external(cfg.default_editor, article_path, wait=True)
+            if action in {"manager", "both"}:
+                if folder_path is None:
+                    self._show_message("未找到目录", ["该条目不支持打开文件管理器。"])
+                    return
+                self._run_external(cfg.default_file_manager, folder_path, wait=False)
+            self._log(f"查看博客：{post.get('slug', '-')}")
+        except Exception as exc:
+            self._show_message("打开外部工具失败", [str(exc)])
+
+    def _resolve_post_paths(self, post: dict[str, str]) -> tuple[Path | None, Path | None]:
+        article_text = str(post.get("article_file", "")).strip()
+        draft_text = str(post.get("draft_dir", "")).strip()
+        article_path: Path | None = None
+        folder_path: Path | None = None
+
+        if article_text and article_text != "Custom":
+            cand = (self.workspace / article_text).resolve()
+            if cand.exists() and cand.is_file():
+                article_path = cand
+                folder_path = cand.parent
+        if draft_text and draft_text != "Custom":
+            cand = (self.workspace / draft_text).resolve()
+            if cand.exists() and cand.is_dir():
+                folder_path = cand
+                if article_path is None:
+                    txt = cand / "my_blog.txt"
+                    if txt.exists() and txt.is_file():
+                        article_path = txt
+        return article_path, folder_path
+
+    def _action_config_openers(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        current_editor = cfg.default_editor.strip() or _default_editor_cmd()
+        current_manager = cfg.default_file_manager.strip() or _default_file_manager_cmd()
+        choice = self._choose_from_list(
+            "配置默认启动命令",
+            [
+                (f"设置默认编辑器命令（当前: {current_editor}）", "editor"),
+                (f"设置默认文件管理器命令（当前: {current_manager}）", "manager"),
+                ("恢复自动默认命令（按系统自动识别）", "reset"),
+            ],
+            default_idx=0,
+        )
+        if choice is None:
+            return
+
+        if choice == "editor":
+            cmd = self._input_line(
+                "默认编辑器命令",
+                "输入命令（示例: code --wait / nvim / nano）:",
+                default=current_editor,
+            )
+            if cmd is None:
+                return
+            cfg = cmd_set_open_commands(
+                self.workspace, editor_cmd=cmd.strip(), quiet=True
+            )
+        elif choice == "manager":
+            cmd = self._input_line(
+                "默认文件管理器命令",
+                "输入命令（示例: xdg-open / open / explorer）:",
+                default=current_manager,
+            )
+            if cmd is None:
+                return
+            cfg = cmd_set_open_commands(
+                self.workspace, file_manager_cmd=cmd.strip(), quiet=True
+            )
+        else:
+            cfg = cmd_set_open_commands(self.workspace, reset=True, quiet=True)
+        self._log("更新默认编辑器/文件管理器命令")
         self._show_message(
-            "已有博客列表", lines[:20] + (["..."] if len(lines) > 20 else [])
+            "配置已保存",
+            [
+                f"默认编辑器: {cfg.default_editor.strip() or _default_editor_cmd()}",
+                f"默认文件管理器: {cfg.default_file_manager.strip() or _default_file_manager_cmd()}",
+            ],
         )
 
     def _action_ai_generate_assets(self) -> None:
