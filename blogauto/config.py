@@ -11,6 +11,7 @@ CONFIG_FILE = "blogauto.json"
 @dataclass
 class BlogConfig:
     workspace: Path
+    content_dir_path: str = ""
     selected_style: str = "clean-light"
     selected_framework: str = "classic"
     deepseek_model: str = "deepseek-chat"
@@ -26,19 +27,22 @@ class BlogConfig:
 
     @property
     def content_dir(self) -> Path:
+        raw = self.content_dir_path.strip()
+        if raw:
+            return Path(raw).expanduser()
         return self.workspace / "content"
 
     @property
     def output_dir(self) -> Path:
-        return self.workspace / "content"
+        return self.content_dir
 
     @property
     def styles_dir(self) -> Path:
-        return self.workspace / "content" / "styles"
+        return self.content_dir / "styles"
 
     @property
     def frameworks_dir(self) -> Path:
-        return self.workspace / "content" / "frameworks"
+        return self.content_dir / "frameworks"
 
     @property
     def prompts_dir(self) -> Path:
@@ -60,6 +64,7 @@ def load_config(workspace: Path) -> BlogConfig:
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
     return BlogConfig(
         workspace=workspace,
+        content_dir_path=data.get("content_dir_path", ""),
         selected_style=data.get("selected_style", "clean-light"),
         selected_framework=data.get("selected_framework", "classic"),
         deepseek_model=data.get("deepseek_model", "deepseek-chat"),
@@ -82,6 +87,7 @@ def save_config(config: BlogConfig) -> None:
             {
                 "selected_style": config.selected_style,
                 "selected_framework": config.selected_framework,
+                "content_dir_path": config.content_dir_path,
                 "deepseek_model": config.deepseek_model,
                 "deepseek_base_url": config.deepseek_base_url,
                 "ai_provider": config.ai_provider,

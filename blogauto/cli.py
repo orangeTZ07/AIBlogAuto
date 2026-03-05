@@ -191,6 +191,34 @@ def _upsert_index_entry(workspace: Path, entry: dict[str, str]) -> None:
     )
 
 
+def _display_path(path: Path, workspace: Path) -> str:
+    try:
+        return str(path.relative_to(workspace))
+    except ValueError:
+        return str(path)
+
+
+def _store_path(workspace: Path, path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(workspace.resolve()))
+    except ValueError:
+        return str(resolved)
+
+
+def _validate_content_dir(path_text: str) -> Path:
+    raw = path_text.strip()
+    if not raw:
+        raise ValueError("路径不能为空。")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError("content 目录必须是绝对路径。")
+    normalized = path.resolve()
+    if normalized.name != "content":
+        raise ValueError("路径必须以 /content/ 结尾。")
+    return normalized
+
+
 def _infer_page_url_for_entry(
     workspace: Path, content_dir: Path, entry: dict[str, str]
 ) -> str:
@@ -279,11 +307,14 @@ def init_workspace(
     ai_key_source: str | None = None,
     ai_model: str | None = None,
     ai_base_url: str | None = None,
+    content_dir: Path | None = None,
 ) -> BlogConfig:
     cfg = BlogConfig(workspace=workspace)
+    if content_dir is not None:
+        cfg.content_dir_path = str(content_dir.resolve())
     workspace.mkdir(parents=True, exist_ok=True)
-    cfg.content_dir.mkdir(exist_ok=True)
-    cfg.output_dir.mkdir(exist_ok=True)
+    cfg.content_dir.mkdir(parents=True, exist_ok=True)
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
     cfg.changes_dir.mkdir(exist_ok=True)
 
     write_builtins(cfg.styles_dir, cfg.frameworks_dir)
@@ -355,7 +386,7 @@ def write_preview(cfg: BlogConfig, open_preview: bool = True) -> None:
     example_tpl = example_framework.read_text(encoding="utf-8")
     for name, style_path in styles.items():
         preview_file = cfg.previews_dir / f"style-{name}.html"
-        style_rel = "../content/styles/" + style_path.name
+        style_rel = os.path.relpath(style_path, preview_file.parent).replace("\\", "/")
         preview_file.write_text(
             example_tpl.format(
                 title=f"样式预览 {name}",
@@ -443,9 +474,9 @@ def seed_example(cfg: BlogConfig) -> None:
             "slug": "welcome",
             "summary": "",
             "category": "default",
-            "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
-            "article_file": str(article.relative_to(cfg.workspace)),
-            "prompt_file": str(prompt_file.relative_to(cfg.workspace)),
+            "draft_dir": _store_path(cfg.workspace, draft_dir),
+            "article_file": _store_path(cfg.workspace, article),
+            "prompt_file": _store_path(cfg.workspace, prompt_file),
             "page_url": "welcome/index.html",
             "style": "__default__",
             "framework": "__default__",
@@ -516,7 +547,8 @@ def _rewrite_homepage_css_href_for_preview(html: str, cfg: BlogConfig) -> str:
         css_path = cfg.styles_dir / f"{style_name}.css"
         if not css_path.exists():
             return match.group(0)
-        return f"href={quote}../content/styles/{style_name}.css{quote}"
+        rel = os.path.relpath(css_path, cfg.previews_dir).replace("\\", "/")
+        return f"href={quote}{rel}{quote}"
 
     return re.sub(
         r'href=(["\'])styles/([a-zA-Z0-9._-]+)\.css\1',
@@ -681,16 +713,14 @@ def cmd_new_post(
             encoding="utf-8",
         )
     style_path = (
-        str((cfg.styles_dir / f"{style_choice}.css").relative_to(cfg.workspace))
+        _display_path(cfg.styles_dir / f"{style_choice}.css", cfg.workspace)
         if style_choice != "__default__"
-        else f"默认样式（由配置 selected_style 决定，目录: {cfg.styles_dir.relative_to(cfg.workspace)}）"
+        else f"默认样式（由配置 selected_style 决定，目录: {_display_path(cfg.styles_dir, cfg.workspace)}）"
     )
     framework_path = (
-        str(
-            (cfg.frameworks_dir / f"{framework_choice}.html").relative_to(cfg.workspace)
-        )
+        _display_path(cfg.frameworks_dir / f"{framework_choice}.html", cfg.workspace)
         if framework_choice != "__default__"
-        else f"默认框架（由配置 selected_framework 决定，目录: {cfg.frameworks_dir.relative_to(cfg.workspace)}）"
+        else f"默认框架（由配置 selected_framework 决定，目录: {_display_path(cfg.frameworks_dir, cfg.workspace)}）"
     )
     prompt_file.write_text(
         (
@@ -699,7 +729,7 @@ def cmd_new_post(
             "请优先遵循本目录提示词，再生成内容。\n"
             f"样式来源: {style_path}\n"
             f"框架来源: {framework_path}\n"
-            "如果你无法访问这些内容，请让你的调用者确保你能够达到my_blog/content/styles和frameworks。"
+            f"如果你无法访问这些内容，请让你的调用者确保你能够访问 {_display_path(cfg.styles_dir, cfg.workspace)} 和 {_display_path(cfg.frameworks_dir, cfg.workspace)}。"
         ),
         encoding="utf-8",
     )
@@ -710,9 +740,9 @@ def cmd_new_post(
             "slug": slug,
             "summary": "",
             "category": category or "default",
-            "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
-            "article_file": str(article.relative_to(cfg.workspace)),
-            "prompt_file": str(prompt_file.relative_to(cfg.workspace)),
+            "draft_dir": _store_path(cfg.workspace, draft_dir),
+            "article_file": _store_path(cfg.workspace, article),
+            "prompt_file": _store_path(cfg.workspace, prompt_file),
             "page_url": f"{relative}/index.html",
             "style": style_choice,
             "framework": framework_choice,
@@ -771,7 +801,7 @@ def cmd_refresh_home_index(
                 if summary_input:
                     item["summary"] = agent.generate_post_summary(
                         summary_input,
-                        source_hint=f"{source_hint} -> {source_file.relative_to(workspace)}",
+                        source_hint=f"{source_hint} -> {_display_path(source_file, workspace)}",
                     )
                 else:
                     item["summary"] = existing_summary
@@ -906,16 +936,15 @@ def cmd_rescan_content_to_index(
         + list(cfg.content_dir.glob("**/post.txt"))
     )
     for file in sorted(draft_files):
-        rel_dir = file.parent.relative_to(workspace)
         slug_guess = file.parent.name or "custom"
         add_entry(
             {
                 "slug": slug_guess,
                 "summary": "",
                 "category": "Custom",
-                "draft_dir": str(rel_dir),
-                "article_file": str(file.relative_to(workspace)),
-                "prompt_file": str((file.parent / "prompt.txt").relative_to(workspace))
+                "draft_dir": _store_path(workspace, file.parent),
+                "article_file": _store_path(workspace, file),
+                "prompt_file": _store_path(workspace, file.parent / "prompt.txt")
                 if (file.parent / "prompt.txt").exists()
                 else "Custom",
                 "page_url": str(
@@ -992,7 +1021,7 @@ class VimTUIApp:
             MenuItem(
                 "rescan_content",
                 "迁移扫描",
-                "快速扫描 my_blog/content/ 并同步到 index.json，未定义字段自动写为 Custom。",
+                "快速扫描当前 content 目录并同步到 index.json，未定义字段自动写为 Custom。",
             ),
             MenuItem(
                 "build_home",
@@ -1013,6 +1042,11 @@ class VimTUIApp:
                 "openers",
                 "配置编辑器/文件管理器启动命令",
                 "按你的习惯设置默认命令，供新建与查看博客时复用。",
+            ),
+            MenuItem(
+                "content_dir",
+                "设置 content 目录",
+                "手动输入绝对路径，路径必须以 /content/ 结尾。",
             ),
             MenuItem("query_blogs", "查看已有博客", "查看已创建博客列表及其目录位置。"),
             MenuItem(
@@ -1212,9 +1246,9 @@ class VimTUIApp:
             self._safe_addstr(6, 2, "博客页创建完成", self.c_purple)
 
             self._safe_addstr(8, 4, "已生成文章模板：", self.c_text)
-            relative_dir = draft_dir.relative_to(self.workspace)
-            folder_name = relative_dir.name
-            parent = str(relative_dir.parent)
+            show_dir = self._fmt_path(draft_dir)
+            folder_name = Path(show_dir).name
+            parent = str(Path(show_dir).parent)
             base = f"{parent}/" if parent and parent != "." else ""
             line_y = 9
             self._safe_addstr(line_y, 6, base, self.c_text)
@@ -1235,13 +1269,13 @@ class VimTUIApp:
             self._safe_addstr(
                 14,
                 4,
-                f"请让它阅读提示词：{prompt_file.relative_to(self.workspace)}",
+                f"请让它阅读提示词：{self._fmt_path(prompt_file)}",
                 self.c_blue,
             )
             self._safe_addstr(
                 16,
                 4,
-                f"文章文件：{article_file.relative_to(self.workspace)}",
+                f"文章文件：{self._fmt_path(article_file)}",
                 self.c_text,
             )
             self._safe_addstr(17, 4, "目录登记：index.json 已更新", self.c_text)
@@ -1375,6 +1409,9 @@ class VimTUIApp:
             width += 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
         return width
 
+    def _fmt_path(self, path: Path) -> str:
+        return _display_path(path, self.workspace)
+
     def _run_menu_action(self, item: MenuItem) -> None:
         if item.key == "sync_pending":
             self._show_sync_placeholder()
@@ -1394,6 +1431,8 @@ class VimTUIApp:
             self._action_set_theme()
         elif item.key == "openers":
             self._action_config_openers()
+        elif item.key == "content_dir":
+            self._action_set_content_dir()
         elif item.key == "query_blogs":
             self._action_query_blogs()
         elif item.key == "check_update":
@@ -1473,6 +1512,20 @@ class VimTUIApp:
         if key_source == "env" and api_key:
             os.environ[_provider_env_var(provider)] = api_key
 
+        default_content = str((self.workspace / "content").resolve())
+        content_text = self._input_line(
+            "Content 目录",
+            "请输入 content 绝对路径（必须以 /content/ 结尾）:",
+            default=default_content,
+        )
+        if content_text is None:
+            return
+        try:
+            content_dir = _validate_content_dir(content_text)
+        except ValueError as exc:
+            self._show_message("content 目录无效", [str(exc)])
+            return
+
         cfg = self._run_with_busy(
             "正在处理：初始化项目目录与预览文件...",
             lambda: init_workspace(
@@ -1484,6 +1537,7 @@ class VimTUIApp:
                 ai_key_source=key_source,
                 ai_model=model or None,
                 ai_base_url=base_url or None,
+                content_dir=content_dir,
             ),
         )
         secret_notice = ""
@@ -1508,9 +1562,10 @@ class VimTUIApp:
                     if key_source == "env"
                     else secret_notice
                 ),
+                f"content 目录：{self._fmt_path(cfg.content_dir)}",
                 f"默认编辑器：{cfg.default_editor}",
                 f"默认文件管理器：{cfg.default_file_manager}",
-                "部署提示：以 GitHub Pages 为例，请将 content/* 放在仓库根目录。",
+                f"部署提示：请确保站点可访问 {cfg.content_dir}/ 下文件。",
             ],
         )
 
@@ -1522,7 +1577,7 @@ class VimTUIApp:
             return
 
         cfg = load_config(self.workspace)
-        prefix = str(cfg.content_dir.relative_to(self.workspace))
+        prefix = self._fmt_path(cfg.content_dir)
         suffix = self._input_line(
             "新建博客页",
             f"当前统一博客目录：{prefix}/ 请输入后续目录（用 / 分层，留空用 {slug}）:",
@@ -1549,7 +1604,7 @@ class VimTUIApp:
             "这篇文章用什么样式？",
             [("使用默认样式（来自“换一个页面风格”）", "__default__")]
             + [
-                (f"{n} [来源: {p.relative_to(self.workspace)}]", n)
+                (f"{n} [来源: {self._fmt_path(p)}]", n)
                 for n, p in styles.items()
             ],
             default_idx=0,
@@ -1561,7 +1616,7 @@ class VimTUIApp:
             [("使用默认框架（来自“换一个页面风格”）", "__default__")]
             + [
                 (
-                    f"{n}（一个 HTML 布局模板等内容） [来源: {p.relative_to(self.workspace)}]",
+                    f"{n}（一个 HTML 布局模板等内容） [来源: {self._fmt_path(p)}]",
                     n,
                 )
                 for n, p in frames.items()
@@ -1583,7 +1638,7 @@ class VimTUIApp:
         draft_dir = result["draft_dir"]
         article_file = result["article_file"]
         prompt_file = result["prompt_file"]
-        self._log(f"创建草稿：{slug} -> {draft_dir.relative_to(self.workspace)}")
+        self._log(f"创建草稿：{slug} -> {self._fmt_path(draft_dir)}")
 
         action = self._choose_open_action(
             "创建完成后下一步要做什么？", include_inline_ai=True
@@ -1645,7 +1700,7 @@ class VimTUIApp:
                 f"索引文件: {index_path.relative_to(self.workspace)}",
                 "每篇文章已确保包含 page_url=<文章目录>/index.html",
                 "每篇文章已补充 summary（my_blog.txt 优先，不存在则读取 index.html）",
-                f"AI 已同步更新主页: {home_path.relative_to(self.workspace)}",
+                f"AI 已同步更新主页: {self._fmt_path(home_path)}",
                 f"本次更新条目数: {len(changed)}",
                 "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
             ],
@@ -1654,8 +1709,9 @@ class VimTUIApp:
     def _action_rescan_content(self) -> None:
         if not self._ensure_ready():
             return
+        cfg = load_config(self.workspace)
         index_path, added = self._run_with_busy(
-            "正在处理：扫描 content 并迁移写入 index.json...",
+            f"正在处理：扫描 {self._fmt_path(cfg.content_dir)} 并迁移写入 index.json...",
             lambda: cmd_rescan_content_to_index(self.workspace, quiet=True),
         )
         self._log(f"迁移扫描完成：新增 {added} 条")
@@ -1663,6 +1719,7 @@ class VimTUIApp:
             "迁移扫描完成",
             [
                 f"索引文件: {index_path.relative_to(self.workspace)}",
+                f"扫描目录: {self._fmt_path(cfg.content_dir)}",
                 f"新增条目: {added}",
                 "未定义字段已自动写为 Custom。",
             ],
@@ -1737,7 +1794,7 @@ class VimTUIApp:
         chosen_style: str | None = None
         if use_existing == "yes":
             style_items = [("不使用样式（纯 HTML）", "__none__")] + [
-                (f"{n} [来源: {p.relative_to(self.workspace)}]", n)
+                (f"{n} [来源: {self._fmt_path(p)}]", n)
                 for n, p in styles.items()
             ]
             picked = self._choose_from_list(
@@ -1764,7 +1821,7 @@ class VimTUIApp:
             target = cfg.styles_dir / f"{name}.css"
             target.write_text(css.strip() + "\n", encoding="utf-8")
             chosen_style = name
-            self._log(f"主页样式已生成：{target.relative_to(self.workspace)}")
+            self._log(f"主页样式已生成：{self._fmt_path(target)}")
 
         framework_goal = self._input_line(
             "主页框架",
@@ -1846,9 +1903,9 @@ class VimTUIApp:
         self._show_message(
             "主页已更新",
             [
-                f"已生成: {home.relative_to(self.workspace)}",
+                f"已生成: {self._fmt_path(home)}",
                 "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
-                f"索引字段提示词: {(cfg.prompts_dir / 'homepage-index-fields.prompt.txt').relative_to(self.workspace)}",
+                f"索引字段提示词: {self._fmt_path(cfg.prompts_dir / 'homepage-index-fields.prompt.txt')}",
                 (
                     f"主页样式: styles/{chosen_style}.css"
                     if chosen_style
@@ -1866,7 +1923,7 @@ class VimTUIApp:
                 self._log(f"打开编辑器：{article_file.name}")
             if action in {"manager", "both"}:
                 self._run_external(cfg.default_file_manager, draft_dir, wait=False)
-                self._log(f"打开文件管理器：{draft_dir.relative_to(self.workspace)}")
+                self._log(f"打开文件管理器：{self._fmt_path(draft_dir)}")
         except Exception as exc:
             self._show_message("打开外部工具失败", [str(exc)])
 
@@ -1916,9 +1973,9 @@ class VimTUIApp:
         self._show_message(
             "页面生成完成",
             [
-                f"正文文件: {article_file.relative_to(self.workspace)}",
+                f"正文文件: {self._fmt_path(article_file)}",
                 (
-                    f"页面文件: {page.relative_to(self.workspace)}"
+                    f"页面文件: {self._fmt_path(page)}"
                     if page.exists()
                     else "页面文件未落在当前目录，可检查 index.json 中 page_url 配置。"
                 ),
@@ -1966,12 +2023,12 @@ class VimTUIApp:
         frames = list_frameworks(cfg.frameworks_dir)
 
         style_items = [
-            (f"{name}  [来源: {path.relative_to(self.workspace)}]", name)
+            (f"{name}  [来源: {self._fmt_path(path)}]", name)
             for name, path in styles.items()
         ]
         frame_items = [
             (
-                f"{name}（一个 HTML 布局模板等内容） [来源: {path.relative_to(self.workspace)}]",
+                f"{name}（一个 HTML 布局模板等内容） [来源: {self._fmt_path(path)}]",
                 name,
             )
             for name, path in frames.items()
@@ -2019,7 +2076,7 @@ class VimTUIApp:
             return
         target = cmd_add_style(self.workspace, name, source, quiet=True)
         self._log(f"导入样式：{name}")
-        self._show_message("导入完成", [str(target.relative_to(self.workspace))])
+        self._show_message("导入完成", [self._fmt_path(target)])
 
     def _action_query_blogs(self) -> None:
         if not self._ensure_ready():
@@ -2154,6 +2211,41 @@ class VimTUIApp:
             ],
         )
 
+    def _action_set_content_dir(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        current = str(cfg.content_dir.resolve())
+        text = self._input_line(
+            "设置 content 目录",
+            "请输入 content 绝对路径（必须以 /content/ 结尾）:",
+            default=current,
+        )
+        if text is None:
+            return
+        try:
+            content_dir = _validate_content_dir(text)
+        except ValueError as exc:
+            self._show_message("content 目录无效", [str(exc)])
+            return
+
+        cfg.content_dir_path = str(content_dir)
+        cfg.content_dir.mkdir(parents=True, exist_ok=True)
+        cfg.styles_dir.mkdir(parents=True, exist_ok=True)
+        cfg.frameworks_dir.mkdir(parents=True, exist_ok=True)
+        write_builtins(cfg.styles_dir, cfg.frameworks_dir)
+        write_preview(cfg, open_preview=False)
+        save_config(cfg)
+        self._log(f"已更新 content 目录：{self._fmt_path(cfg.content_dir)}")
+        self._show_message(
+            "content 目录已更新",
+            [
+                f"新目录: {self._fmt_path(cfg.content_dir)}",
+                "后续新建、扫描、构建都会使用该目录。",
+                "旧目录中的内容不会自动迁移，请按需手动移动。",
+            ],
+        )
+
     def _action_ai_generate_assets(self) -> None:
         if not self._ensure_ready():
             return
@@ -2215,12 +2307,12 @@ class VimTUIApp:
                 )
 
             target.write_text(content.strip() + "\n", encoding="utf-8")
-            self._log(f"AI 生成{kind}: {target.relative_to(self.workspace)}")
+            self._log(f"AI 生成{kind}: {self._fmt_path(target)}")
             self._open_generated_preview(cfg, kind, target)
             self._show_message(
                 "生成完成",
                 [
-                    f"已写入: {target.relative_to(self.workspace)}",
+                    f"已写入: {self._fmt_path(target)}",
                     "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
                 ],
             )
@@ -2236,11 +2328,11 @@ class VimTUIApp:
             "打开模板目录并编辑：选择类型",
             [
                 (
-                    f"样式文件（来源目录: {cfg.styles_dir.relative_to(self.workspace)}）",
+                    f"样式文件（来源目录: {self._fmt_path(cfg.styles_dir)}）",
                     "style",
                 ),
                 (
-                    f"框架文件（一个 HTML 布局模板等内容，来源目录: {cfg.frameworks_dir.relative_to(self.workspace)}）",
+                    f"框架文件（一个 HTML 布局模板等内容，来源目录: {self._fmt_path(cfg.frameworks_dir)}）",
                     "framework",
                 ),
             ],
@@ -2254,7 +2346,7 @@ class VimTUIApp:
             entries = list_frameworks(cfg.frameworks_dir)
 
         items = [
-            (f"{name} [来源: {path.relative_to(self.workspace)}]", str(path))
+            (f"{name} [来源: {self._fmt_path(path)}]", str(path))
             for name, path in entries.items()
         ]
         picked = self._choose_from_list("选择要修改的文件", items)
@@ -2263,8 +2355,8 @@ class VimTUIApp:
 
         target = Path(picked)
         self._run_external(cfg.default_editor, target, wait=True)
-        self._log(f"编辑模板文件：{target.relative_to(self.workspace)}")
-        self._show_message("已打开编辑器", [str(target.relative_to(self.workspace))])
+        self._log(f"编辑模板文件：{self._fmt_path(target)}")
+        self._show_message("已打开编辑器", [self._fmt_path(target)])
 
     def _show_sync_placeholder(self) -> None:
         choice = self._choose_from_list(
@@ -2325,6 +2417,7 @@ class VimTUIApp:
                 write_preview(cfg, open_preview=False)
             tpl = (cfg.frameworks_dir / "example.html").read_text(encoding="utf-8")
             preview = cfg.previews_dir / f"generated-style-{target.stem}.html"
+            style_href = os.path.relpath(target, preview.parent).replace("\\", "/")
             preview.write_text(
                 tpl.format(
                     title=f"样式预览 {target.stem}",
@@ -2335,7 +2428,7 @@ class VimTUIApp:
                         "<p>这是自动预览页面。</p>"
                         "<p>如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。</p>"
                     ),
-                    style_href="../content/styles/" + target.name,
+                    style_href=style_href,
                 ),
                 encoding="utf-8",
             )

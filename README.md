@@ -127,6 +127,7 @@ TUI 使用 Nerd Font 图标（如 `JetBrainsMono Nerd Font`）。
   - 如果你期望更换`文章prompt`，你可以在`cli.py`中用文本搜索找到提示词所在代码块并修改
 - 如果你从前写了一些博客
   - 你可以把博客所在目录（一篇博客占一个目录）复制到`my_blog/content/`下
+    - 你也可以把`content/`目录换到其他地方，但是目录名必须为`content/`
   - 然后运行"迁移扫描"，这会把你的博客页更新到`index.json`
   - 如果你想要自定义你的博客属性，你可以找到`my_blog/index.json`，自行修改
 - 运行"查看已有博客"，判断是否成功写入文章

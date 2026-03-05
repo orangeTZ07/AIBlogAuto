@@ -34,8 +34,11 @@ class DirectoryScanner:
     def _snapshot(self, content_dir: Path) -> dict[str, str]:
         mapping: dict[str, str] = {}
         for path in sorted(content_dir.glob("**/*.txt")):
-            rel = str(path.relative_to(self.workspace))
-            mapping[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+            try:
+                key = str(path.relative_to(self.workspace))
+            except ValueError:
+                key = str(path.resolve())
+            mapping[key] = hashlib.sha256(path.read_bytes()).hexdigest()
         return mapping
 
     def _load_snapshot(self) -> dict[str, str]:
