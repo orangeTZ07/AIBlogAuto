@@ -1,5 +1,21 @@
 # AIBlogAuto
 
+<details>
+  <summary><strong>目录导航（点击跳转）</strong></summary>
+  <ul>
+    <li><a href="#特性">特性</a></li>
+    <li><a href="#安装">安装</a></li>
+    <li><a href="#运行">运行</a></li>
+    <li><a href="#键位说明">键位说明</a></li>
+    <li><a href="#草稿文件说明">草稿文件说明</a></li>
+    <li><a href="#deepseek-配置">DeepSeek 配置</a></li>
+    <li><a href="#nerd-font">Nerd Font</a></li>
+    <li><a href="#目录结构初始化后">目录结构（初始化后）</a></li>
+    <li><a href="#简易教程">简易教程</a></li>
+    <li><a href="#faq">FAQ</a></li>
+  </ul>
+</details>
+
 以 AI 为特色的模块化博客生成器（Python + DeepSeek API），现代化全屏 TUI。
 ![项目截图](./screenshot/AIBlogAuto.png "界面预览")
 
@@ -123,3 +139,8 @@ TUI 使用 Nerd Font 图标（如 `JetBrainsMono Nerd Font`）。
   - 可先在 content/ 目录下进行初始化git仓库
   - 然后将该git仓库连接到你的github page仓库
   - 使用本程序进行构建/修改后提交到你的仓库
+
+## FAQ
+
+- Q:我在生成主页后，浏览器里的文章链接都打不开是怎么回事？
+  - A:生成主页后打开的预览界面是在previews目录下的一个预览html,里面的文章链接是基于previews的。如果你想预览你真正的主页，请将url中的previews替换为content, 文件名替换为index.html。如果本回答不够详细，你可以复制本回答和你的预览页面地址，一并投喂给AI，让AI详细作答。

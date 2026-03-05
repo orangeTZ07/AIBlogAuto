@@ -31,6 +31,8 @@ from .registry import (
 )
 from .scanner import DirectoryScanner
 
+UPSTREAM_REPO_URL = "https://github.com/orangeTZ07/AIBlogAuto.git"
+
 
 def _default_editor_cmd() -> str:
     return (shutil.which("code") and "code") or "nano"
@@ -103,6 +105,71 @@ def _run_open_command(command: str, target: Path, wait: bool = False) -> None:
         subprocess.run(argv, check=True)
     else:
         subprocess.Popen(argv)
+
+
+def _run_git_capture(
+    repo_dir: Path, args: list[str], timeout: float = 4.0
+) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return None
+
+
+def _detect_update_notice() -> str | None:
+    if shutil.which("git") is None:
+        return None
+    repo_dir = Path(__file__).resolve().parents[1]
+    if _run_git_capture(repo_dir, ["rev-parse", "--is-inside-work-tree"]) != "true":
+        return None
+
+    branch = _run_git_capture(repo_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if not branch or branch == "HEAD":
+        return None
+
+    fetch_source = UPSTREAM_REPO_URL
+    origin_url = _run_git_capture(repo_dir, ["remote", "get-url", "origin"])
+    if origin_url:
+        fetch_source = "origin"
+
+    try:
+        subprocess.run(
+            ["git", "fetch", "--quiet", "--depth=1", fetch_source, branch],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except Exception:
+        return None
+
+    counts = _run_git_capture(
+        repo_dir, ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"]
+    )
+    if not counts:
+        return None
+    parts = counts.split()
+    if len(parts) != 2:
+        return None
+    try:
+        ahead, behind = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+    if behind <= 0:
+        return None
+    if ahead > 0:
+        return f"检测到新版本：当前分支落后 {behind} 个提交（本地超前 {ahead} 个提交）。"
+    return f"检测到新版本：当前分支落后 {behind} 个提交，建议执行 git pull。"
 
 
 def _upsert_index_entry(workspace: Path, entry: dict[str, str]) -> None:
@@ -904,11 +971,16 @@ class MenuItem:
 
 class VimTUIApp:
     def __init__(
-        self, stdscr: curses.window, workspace: Path, no_browser: bool
+        self,
+        stdscr: curses.window,
+        workspace: Path,
+        no_browser: bool,
+        update_notice: str | None = None,
     ) -> None:
         self.stdscr = stdscr
         self.workspace = workspace
         self.no_browser = no_browser
+        self.update_notice = update_notice
         self.logs: list[str] = []
         self.menu = [
             MenuItem("init", "第一次使用：一键准备", "自动完成目录与基础设置。"),
@@ -1083,18 +1155,24 @@ class VimTUIApp:
     def _draw_main(self) -> None:
         self.stdscr.clear()
         self._draw_header()
+        base_y = 6
+        if self.update_notice:
+            self._safe_addstr(base_y, 2, f"版本提示: {self.update_notice}", self.c_red)
+            base_y += 1
+
         ready = "已准备" if (self.workspace / "blogauto.json").exists() else "未准备"
-        self._safe_addstr(6, 2, f"当前状态: {ready}", self.c_blue)
-        self._safe_addstr(7, 2, "主菜单（按数字可直接进入）", self.c_text)
+        self._safe_addstr(base_y, 2, f"当前状态: {ready}", self.c_blue)
+        self._safe_addstr(base_y + 1, 2, "主菜单（按数字可直接进入）", self.c_text)
+        menu_top = base_y + 3
 
         for idx, item in enumerate(self.menu):
             prefix = "❯" if idx == self.selected else " "
             disable_tag = " [待实现]" if not item.enabled else ""
             text = f"{prefix} [{idx + 1}] {item.title}{disable_tag}"
             style = self.c_focus if idx == self.selected else self.c_text
-            self._safe_addstr(9 + idx, 4, text, style)
+            self._safe_addstr(menu_top + idx, 4, text, style)
 
-        tip_top = 9 + len(self.menu) + 1
+        tip_top = menu_top + len(self.menu) + 1
         self._draw_box(tip_top, 2, 5, "功能注解")
         self._safe_addstr(tip_top + 2, 4, self.menu[self.selected].hint, self.c_text)
 
@@ -2417,13 +2495,13 @@ class VimTUIApp:
             pass
 
 
-def run_tui(workspace: Path, no_browser: bool) -> int:
+def run_tui(workspace: Path, no_browser: bool, update_notice: str | None = None) -> int:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("错误: 交互式 TUI 需要在终端中运行")
         return 2
 
     def _wrapped(stdscr: curses.window) -> int:
-        app = VimTUIApp(stdscr, workspace, no_browser)
+        app = VimTUIApp(stdscr, workspace, no_browser, update_notice=update_notice)
         return app.run()
 
     return curses.wrapper(_wrapped)
@@ -2449,11 +2527,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     workspace = Path(args.workspace).expanduser().resolve()
 
+    update_notice: str | None = None
     if shutil.which("git") is None:
         print("警告: 未检测到 git，提交功能将不可用")
+    else:
+        update_notice = _detect_update_notice()
 
     try:
-        return run_tui(workspace, no_browser=args.no_browser)
+        return run_tui(workspace, no_browser=args.no_browser, update_notice=update_notice)
     except KeyboardInterrupt:
         print("\n已取消")
         return 130
