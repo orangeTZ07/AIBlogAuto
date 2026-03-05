@@ -866,7 +866,7 @@ def _ensure_unique_slug(slug: str, used: set[str]) -> str:
 
 def cmd_rescan_content_to_index(
     workspace: Path, quiet: bool = False
-) -> tuple[Path, int]:
+) -> tuple[Path, int, int]:
     cfg = load_config(workspace)
     index_path = workspace / "index.json"
     data = _read_index_data(index_path)
@@ -883,12 +883,48 @@ def cmd_rescan_content_to_index(
     known_article_files: set[str] = set()
     known_draft_dirs: set[str] = set()
     known_page_urls: set[str] = set()
+    removed = 0
+
+    # 先收集当前 content 目录中真实存在的草稿/页面，用于清理失效条目。
+    draft_files = (
+        list(cfg.content_dir.glob("**/my_blog.txt"))
+        + list(cfg.content_dir.glob("**/myblog.txt"))
+        + list(cfg.content_dir.glob("**/post.txt"))
+    )
+    existing_article_files = {_norm_key(_store_path(workspace, f)) for f in draft_files}
+    existing_draft_dirs = {
+        _norm_key(_store_path(workspace, f.parent)) for f in draft_files
+    }
+    html_candidates = list(cfg.content_dir.glob("**/index.html"))
+    existing_page_urls = {
+        _norm_key(str(h.relative_to(cfg.content_dir)))
+        for h in html_candidates
+        if h.relative_to(cfg.content_dir) != Path("index.html")
+        and not any(
+            part in {"styles", "frameworks", "previews"}
+            for part in h.relative_to(cfg.content_dir).parts
+        )
+    }
 
     # 清理 index.json 中已存在的重复项：同 article_file/draft_dir/page_url 视为同一篇。
     for p in raw_posts:
         article_key = _norm_key(str(p.get("article_file", "")))
         draft_key = _norm_key(str(p.get("draft_dir", "")))
         page_key = _norm_key(str(p.get("page_url", "")))
+        has_source = False
+        source_exists = False
+        if _usable(article_key):
+            has_source = True
+            source_exists = source_exists or article_key in existing_article_files
+        if _usable(draft_key):
+            has_source = True
+            source_exists = source_exists or draft_key in existing_draft_dirs
+        if _usable(page_key):
+            has_source = True
+            source_exists = source_exists or page_key in existing_page_urls
+        if has_source and not source_exists:
+            removed += 1
+            continue
         if _usable(article_key) and article_key in known_article_files:
             continue
         if _usable(draft_key) and draft_key in known_draft_dirs:
@@ -933,11 +969,6 @@ def cmd_rescan_content_to_index(
         added += 1
 
     # 1) 草稿文件扫描：my_blog/myblog/post
-    draft_files = (
-        list(cfg.content_dir.glob("**/my_blog.txt"))
-        + list(cfg.content_dir.glob("**/myblog.txt"))
-        + list(cfg.content_dir.glob("**/post.txt"))
-    )
     for file in sorted(draft_files):
         slug_guess = file.parent.name or "custom"
         add_entry(
@@ -960,7 +991,6 @@ def cmd_rescan_content_to_index(
         )
 
     # 2) 已存在页面扫描：任意 index.html（排除主页和模板/预览）
-    html_candidates = list(cfg.content_dir.glob("**/index.html"))
     for html in sorted(html_candidates):
         rel = html.relative_to(cfg.content_dir)
         if rel == Path("index.html"):
@@ -989,8 +1019,8 @@ def cmd_rescan_content_to_index(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     if not quiet:
-        print(f"扫描完成: {index_path}, 新增 {added} 条")
-    return index_path, added
+        print(f"扫描完成: {index_path}, 新增 {added} 条, 删除 {removed} 条")
+    return index_path, added, removed
 
 
 @dataclass
@@ -1713,17 +1743,18 @@ class VimTUIApp:
         if not self._ensure_ready():
             return
         cfg = load_config(self.workspace)
-        index_path, added = self._run_with_busy(
+        index_path, added, removed = self._run_with_busy(
             f"正在处理：扫描 {self._fmt_path(cfg.content_dir)} 并迁移写入 index.json...",
             lambda: cmd_rescan_content_to_index(self.workspace, quiet=True),
         )
-        self._log(f"迁移扫描完成：新增 {added} 条")
+        self._log(f"迁移扫描完成：新增 {added} 条，删除 {removed} 条")
         self._show_message(
             "迁移扫描完成",
             [
                 f"索引文件: {index_path.relative_to(self.workspace)}",
                 f"扫描目录: {self._fmt_path(cfg.content_dir)}",
                 f"新增条目: {added}",
+                f"删除失效条目: {removed}",
                 "未定义字段已自动写为 Custom。",
             ],
         )
