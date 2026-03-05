@@ -1780,7 +1780,10 @@ class VimTUIApp:
             return
         cfg = load_config(self.workspace)
         _ensure_homepage_prompts(cfg)
-        cmd_refresh_home_index(self.workspace, quiet=True)
+        self._run_with_busy(
+            "正在处理：同步索引并补全摘要...",
+            lambda: cmd_refresh_home_index(self.workspace, quiet=True),
+        )
         styles = list_styles(cfg.styles_dir)
 
         use_existing = self._choose_from_list(
