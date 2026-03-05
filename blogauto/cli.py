@@ -1780,10 +1780,6 @@ class VimTUIApp:
             return
         cfg = load_config(self.workspace)
         _ensure_homepage_prompts(cfg)
-        self._run_with_busy(
-            "正在处理：同步索引并补全摘要...",
-            lambda: cmd_refresh_home_index(self.workspace, quiet=True),
-        )
         styles = list_styles(cfg.styles_dir)
 
         use_existing = self._choose_from_list(
@@ -1841,6 +1837,10 @@ class VimTUIApp:
         )
         if style_text is None or not style_text:
             return
+        self._run_with_busy(
+            "正在处理：同步索引并补全摘要...",
+            lambda: cmd_refresh_home_index(self.workspace, quiet=True),
+        )
         index_path = self.workspace / "index.json"
         posts_json = index_path.read_text(encoding="utf-8")
         fields_prompt = (
