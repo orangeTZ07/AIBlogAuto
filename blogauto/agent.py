@@ -119,7 +119,7 @@ class BlogAgent:
             + posts_json
         )
         if style_name:
-            prompt += f"\\n请在首页中通过 <link> 引用 styles/{style_name}.css。"
+            prompt += self._build_homepage_style_prompt(style_name)
         text = provider.chat(
             system_prompt="你是网站信息架构师和前端助手，擅长生成结构清晰的首页。",
             user_prompt=prompt,
@@ -149,13 +149,59 @@ class BlogAgent:
             f"用户修改意见:\\n{feedback}"
         )
         if style_name:
-            prompt += f"\\n继续使用样式：styles/{style_name}.css。"
+            prompt += self._build_homepage_style_prompt(style_name)
         text = provider.chat(
             system_prompt="你是网站信息架构师和前端助手，擅长增量修改首页。",
             user_prompt=prompt,
             temperature=0.4,
         )
         return self._strip_code_fence(text)
+
+    def _build_homepage_style_prompt(self, style_name: str) -> str:
+        style_path = self.config.styles_dir / f"{style_name}.css"
+        if not style_path.exists():
+            return (
+                f"\\n继续使用样式：styles/{style_name}.css。"
+                "\\n注意：样式文件不存在时，请至少保留对应 <link> 标签。"
+            )
+        css = style_path.read_text(encoding="utf-8").strip()
+        if len(css) > 12000:
+            css = css[:12000] + "\\n/* ...truncated... */"
+        return (
+            f"\\n继续使用样式：styles/{style_name}.css。"
+            "\\n你必须保证结构与该 CSS 选择器兼容。"
+            "\\nCSS 内容如下：\\n```css\\n"
+            + css
+            + "\\n```"
+        )
+
+    def generate_post_summary(self, source_text: str, source_hint: str = "") -> str:
+        cleaned = source_text.strip()
+        if not cleaned:
+            return ""
+        try:
+            provider = create_provider(self.config)
+            hint_line = f"\n素材来源提示: {source_hint}" if source_hint else ""
+            prompt = (
+                "请为一篇博客文章生成简介（summary）。\n"
+                "要求：\n"
+                "1) 使用中文；\n"
+                "2) 1-2 句话；\n"
+                "3) 40-120 字；\n"
+                "4) 信息准确，不要编造；\n"
+                "5) 只输出简介文本，不要标题、前缀或解释。\n"
+                f"{hint_line}\n\n"
+                "文章素材如下：\n"
+                f"{cleaned[:6000]}"
+            )
+            text = provider.chat(
+                system_prompt="你是中文技术博客编辑，擅长提炼准确简介。",
+                user_prompt=prompt,
+                temperature=0.3,
+            )
+            return self._normalize_summary(self._strip_code_fence(text))
+        except Exception:
+            return self._fallback_summary(cleaned)
 
     def _build_prompt(self, raw_text: str) -> str:
         return (
@@ -181,6 +227,15 @@ class BlogAgent:
             if m:
                 return m.group(1).strip()
         return block
+
+    def _normalize_summary(self, text: str) -> str:
+        one_line = " ".join(text.strip().split())
+        return one_line[:180]
+
+    def _fallback_summary(self, source_text: str) -> str:
+        plain = re.sub(r"<[^>]+>", " ", source_text)
+        compact = " ".join(plain.split())
+        return compact[:120]
 
     def _fallback_output(self, raw_text: str, subtitle_hint: str) -> AgentOutput:
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]

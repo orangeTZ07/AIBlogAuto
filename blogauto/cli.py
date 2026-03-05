@@ -13,6 +13,7 @@ import time
 import webbrowser
 import json
 import os
+import re
 import unicodedata
 import threading
 
@@ -151,6 +152,55 @@ def _infer_page_url_for_entry(
     if existing and existing.endswith("/index.html"):
         return existing.lstrip("/")
     return f"{slug}/index.html"
+
+
+def _is_usable_index_value(value: object) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and text != "Custom"
+
+
+def _extract_summary_input(raw_text: str, source_name: str) -> str:
+    text = raw_text.strip()
+    if source_name.endswith(".html"):
+        text = re.sub(r"(?is)<script.*?>.*?</script>", " ", text)
+        text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+        text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return " ".join(text.split())[:8000]
+
+
+def _resolve_post_directory(
+    workspace: Path, content_dir: Path, entry: dict
+) -> Path | None:
+    for key in ("article_file", "draft_dir"):
+        value = str(entry.get(key, "")).strip()
+        if not _is_usable_index_value(value):
+            continue
+        p = (workspace / value).resolve()
+        target_dir = p.parent if key == "article_file" else p
+        if target_dir.exists() and target_dir.is_dir():
+            return target_dir
+
+    page_url = str(entry.get("page_url", "")).strip()
+    if page_url:
+        page_path = (content_dir / page_url).resolve()
+        if page_path.exists():
+            return page_path.parent
+    return None
+
+
+def _find_summary_source_file(
+    workspace: Path, content_dir: Path, entry: dict
+) -> tuple[Path | None, str]:
+    target_dir = _resolve_post_directory(workspace, content_dir, entry)
+    if target_dir is None:
+        return None, ""
+    draft_file = target_dir / "my_blog.txt"
+    if draft_file.exists():
+        return draft_file, "my_blog.txt"
+    page_file = target_dir / "index.html"
+    if page_file.exists():
+        return page_file, "index.html"
+    return None, ""
 
 
 def init_workspace(
@@ -324,6 +374,7 @@ def seed_example(cfg: BlogConfig) -> None:
         cfg.workspace,
         {
             "slug": "welcome",
+            "summary": "",
             "category": "default",
             "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
             "article_file": str(article.relative_to(cfg.workspace)),
@@ -340,20 +391,33 @@ def seed_example(cfg: BlogConfig) -> None:
 def _ensure_homepage_prompts(cfg: BlogConfig) -> None:
     cfg.prompts_dir.mkdir(parents=True, exist_ok=True)
     p = cfg.prompts_dir / "homepage-index-fields.prompt.txt"
+    summary_line = "- summary: 文章简介（建议 1-2 句）\\n"
     if not p.exists():
         p.write_text(
-            (
-                "你要根据以下字段构建主页索引：\\n"
-                "- slug: 博客短名\\n"
-                "- category: 分类\\n"
-                "- draft_dir: 原始草稿路径\\n"
-                "- article_file: 内容文件路径\\n"
-                "- page_url: 文章页面路径（必须精确指向每篇文章的 index.html）\\n"
-                "- style/framework: 文章选择的样式和框架（__default__ 表示使用默认）\\n"
-                "请按用户提供的目录风格偏好组织索引区块。\\n"
+            "".join(
+                [
+                    "你要根据以下字段构建主页索引：\\n",
+                    "- slug: 博客短名\\n",
+                    summary_line,
+                    "- category: 分类\\n",
+                    "- draft_dir: 原始草稿路径\\n",
+                    "- article_file: 内容文件路径\\n",
+                    "- page_url: 文章页面路径（必须精确指向每篇文章的 index.html）\\n",
+                    "- style/framework: 文章选择的样式和框架（__default__ 表示使用默认）\\n",
+                    "请按用户提供的目录风格偏好组织索引区块。\\n",
+                ]
             ),
             encoding="utf-8",
         )
+    else:
+        content = p.read_text(encoding="utf-8")
+        if summary_line.strip() not in content:
+            marker = "- slug: 博客短名\\n"
+            if marker in content:
+                content = content.replace(marker, marker + summary_line, 1)
+            else:
+                content = content.rstrip() + "\\n" + summary_line
+            p.write_text(content, encoding="utf-8")
     p_style = cfg.prompts_dir / "homepage-directory-style.prompt.txt"
     if not p_style.exists():
         p_style.write_text("按分类分组并按创建时间倒序", encoding="utf-8")
@@ -362,6 +426,37 @@ def _ensure_homepage_prompts(cfg: BlogConfig) -> None:
         p_framework.write_text(
             "信息密度高，左侧分类导航，右侧文章索引", encoding="utf-8"
         )
+
+
+def _ensure_homepage_stylesheet_link(html: str, style_name: str | None) -> str:
+    if not style_name:
+        return html
+    href = f"styles/{style_name}.css"
+    if re.search(rf'href=["\']{re.escape(href)}["\']', html, re.IGNORECASE):
+        return html
+    link = f'  <link rel="stylesheet" href="{href}" />'
+    if re.search(r"</head>", html, re.IGNORECASE):
+        return re.sub(
+            r"</head>", link + "\n</head>", html, count=1, flags=re.IGNORECASE
+        )
+    return link + "\n" + html
+
+
+def _rewrite_homepage_css_href_for_preview(html: str, cfg: BlogConfig) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        quote = match.group(1)
+        style_name = match.group(2)
+        css_path = cfg.styles_dir / f"{style_name}.css"
+        if not css_path.exists():
+            return match.group(0)
+        return f"href={quote}../content/styles/{style_name}.css{quote}"
+
+    return re.sub(
+        r'href=(["\'])styles/([a-zA-Z0-9._-]+)\.css\1',
+        _replace,
+        html,
+        flags=re.IGNORECASE,
+    )
 
 
 def cmd_build_homepage_with_ai(
@@ -388,11 +483,7 @@ def cmd_build_homepage_with_ai(
         framework_goal=framework_goal,
         style_name=style_name,
     )
-    if style_name and "stylesheet" not in homepage_html:
-        homepage_html = homepage_html.replace(
-            "</head>",
-            f'  <link rel="stylesheet" href="styles/{style_name}.css" />\n</head>',
-        )
+    homepage_html = _ensure_homepage_stylesheet_link(homepage_html, style_name)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     out = cfg.output_dir / "index.html"
     out.write_text(homepage_html, encoding="utf-8")
@@ -550,6 +641,7 @@ def cmd_new_post(
         cfg.workspace,
         {
             "slug": slug,
+            "summary": "",
             "category": category or "default",
             "draft_dir": str(draft_dir.relative_to(cfg.workspace)),
             "article_file": str(article.relative_to(cfg.workspace)),
@@ -583,13 +675,16 @@ def list_existing_blogs(workspace: Path) -> list[dict[str, str]]:
         return []
 
 
-def cmd_refresh_home_index(workspace: Path, quiet: bool = False) -> Path:
+def cmd_refresh_home_index(
+    workspace: Path, force_regenerate_summary: bool = False, quiet: bool = False
+) -> Path:
     cfg = load_config(workspace)
     index_path = workspace / "index.json"
     if not index_path.exists():
         raise FileNotFoundError("未找到 index.json，先创建文章草稿。")
     data = json.loads(index_path.read_text(encoding="utf-8"))
     posts = data.get("posts", [])
+    agent = BlogAgent(cfg)
     for item in posts:
         slug = str(item.get("slug", "")).strip()
         if not slug:
@@ -597,6 +692,26 @@ def cmd_refresh_home_index(workspace: Path, quiet: bool = False) -> Path:
         item["page_url"] = _infer_page_url_for_entry(
             workspace, cfg.content_dir.resolve(), item
         )
+        existing_summary = str(item.get("summary", "")).strip()
+        need_summary = force_regenerate_summary or not existing_summary
+        if need_summary:
+            source_file, source_hint = _find_summary_source_file(
+                workspace, cfg.content_dir.resolve(), item
+            )
+            if source_file is not None:
+                raw_text = source_file.read_text(encoding="utf-8", errors="ignore")
+                summary_input = _extract_summary_input(raw_text, source_hint)
+                if summary_input:
+                    item["summary"] = agent.generate_post_summary(
+                        summary_input,
+                        source_hint=f"{source_hint} -> {source_file.relative_to(workspace)}",
+                    )
+                else:
+                    item["summary"] = existing_summary
+            else:
+                item["summary"] = existing_summary
+        else:
+            item["summary"] = existing_summary
         item["category"] = item.get("category") or "default"
         item["style"] = item.get("style") or "__default__"
         item["framework"] = item.get("framework") or "__default__"
@@ -729,6 +844,7 @@ def cmd_rescan_content_to_index(
         add_entry(
             {
                 "slug": slug_guess,
+                "summary": "",
                 "category": "Custom",
                 "draft_dir": str(rel_dir),
                 "article_file": str(file.relative_to(workspace)),
@@ -756,7 +872,9 @@ def cmd_rescan_content_to_index(
         add_entry(
             {
                 "slug": slug_guess,
+                "summary": "",
                 "category": "Custom",
+                "parent_directory": "content",
                 "draft_dir": "Custom",
                 "article_file": "Custom",
                 "prompt_file": "Custom",
@@ -797,7 +915,7 @@ class VimTUIApp:
             MenuItem(
                 "refresh_index",
                 "一键更新主页",
-                "更新网站主页文章索引，将新文章直接嵌入主页，同时确保每篇文章都准确指向 index.html。",
+                "更新网站主页文章索引，将新文章直接嵌入主页，同时让AI生成文章简介。",
             ),
             MenuItem(
                 "rescan_content",
@@ -1156,7 +1274,7 @@ class VimTUIApp:
                 continue
             if key in (10, 13, curses.KEY_ENTER, "\n", "\r"):
                 return "".join(buf).strip()
-            if key in (ord("q"), "q") and not buf:
+            if key in (ord("q"), "q"):
                 return None
             if key in (ord("?"), "?"):
                 self._show_help()
@@ -1401,9 +1519,29 @@ class VimTUIApp:
         _ensure_homepage_prompts(cfg)
         index_file = self.workspace / "index.json"
         before = _read_index_data(index_file)
+        has_existing_summary = any(
+            str(x.get("summary", "")).strip() for x in before.get("posts", [])
+        )
+        force_regenerate_summary = False
+        if has_existing_summary:
+            strategy = self._choose_from_list(
+                "检测到已有简介，是否重生成？",
+                [
+                    ("仅补全缺失简介（推荐）", "missing_only"),
+                    ("强制重生成全部简介", "force_all"),
+                ],
+                default_idx=0,
+            )
+            if strategy is None:
+                return
+            force_regenerate_summary = strategy == "force_all"
         index_path = self._run_with_busy(
             "正在处理：更新主页索引字段...",
-            lambda: cmd_refresh_home_index(self.workspace, quiet=True),
+            lambda: cmd_refresh_home_index(
+                self.workspace,
+                force_regenerate_summary=force_regenerate_summary,
+                quiet=True,
+            ),
         )
         after = _read_index_data(index_path)
         changed = _changed_posts(before, after)
@@ -1421,6 +1559,7 @@ class VimTUIApp:
             [
                 f"索引文件: {index_path.relative_to(self.workspace)}",
                 "每篇文章已确保包含 page_url=<文章目录>/index.html",
+                "每篇文章已补充 summary（my_blog.txt 优先，不存在则读取 index.html）",
                 f"AI 已同步更新主页: {home_path.relative_to(self.workspace)}",
                 f"本次更新条目数: {len(changed)}",
                 "如果浏览器预览调用失败，请自行将模板所在路径放入浏览器地址栏进行预览。",
@@ -1574,15 +1713,12 @@ class VimTUIApp:
                 style_name=chosen_style,
             ),
         )
-        if chosen_style and "stylesheet" not in html:
-            html = html.replace(
-                "</head>",
-                f'  <link rel="stylesheet" href="styles/{chosen_style}.css" />\n</head>',
-            )
+        html = _ensure_homepage_stylesheet_link(html, chosen_style)
         while True:
             preview = cfg.previews_dir / "homepage-candidate.html"
             cfg.previews_dir.mkdir(parents=True, exist_ok=True)
-            preview.write_text(html, encoding="utf-8")
+            preview_html = _rewrite_homepage_css_href_for_preview(html, cfg)
+            preview.write_text(preview_html, encoding="utf-8")
             try:
                 webbrowser.open(preview.resolve().as_uri())
             except Exception:
@@ -1617,11 +1753,7 @@ class VimTUIApp:
                     style_name=chosen_style,
                 ),
             )
-            if chosen_style and "stylesheet" not in html:
-                html = html.replace(
-                    "</head>",
-                    f'  <link rel="stylesheet" href="styles/{chosen_style}.css" />\n</head>',
-                )
+            html = _ensure_homepage_stylesheet_link(html, chosen_style)
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         home = cfg.output_dir / "index.html"
         home.write_text(html, encoding="utf-8")
