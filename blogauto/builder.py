@@ -8,6 +8,7 @@ import os
 from .agent import BlogAgent
 from .config import BlogConfig
 from .registry import list_frameworks, list_styles
+from .template_utils import render_template_placeholders
 
 
 @dataclass
@@ -51,7 +52,8 @@ class BlogBuilder:
             style_href = os.path.relpath(
                 self.config.styles_dir / f"{style_name}.css", out_dir
             ).replace("\\", "/")
-            rendered = template.format(
+            rendered = render_template_placeholders(
+                template,
                 title=post.title,
                 blog_name="AI Blog",
                 subtitle=post.subtitle,

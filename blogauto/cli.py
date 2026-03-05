@@ -30,6 +30,7 @@ from .registry import (
     write_builtins,
 )
 from .scanner import DirectoryScanner
+from .template_utils import render_template_placeholders
 
 UPSTREAM_REPO_URL = "https://github.com/orangeTZ07/AIBlogAuto.git"
 
@@ -388,7 +389,8 @@ def write_preview(cfg: BlogConfig, open_preview: bool = True) -> None:
         preview_file = cfg.previews_dir / f"style-{name}.html"
         style_rel = os.path.relpath(style_path, preview_file.parent).replace("\\", "/")
         preview_file.write_text(
-            example_tpl.format(
+            render_template_placeholders(
+                example_tpl,
                 title=f"样式预览 {name}",
                 blog_name="Style Preview",
                 subtitle="示例框架 example.html + 当前样式",
@@ -408,7 +410,8 @@ def write_preview(cfg: BlogConfig, open_preview: bool = True) -> None:
     for name, frame_path in frames.items():
         preview_file = cfg.previews_dir / f"framework-{name}.html"
         tpl = frame_path.read_text(encoding="utf-8")
-        rendered = tpl.format(
+        rendered = render_template_placeholders(
+            tpl,
             title=f"框架预览 {name}",
             blog_name="Framework Preview",
             subtitle="本 html 没有使用任何样式(css)",
@@ -2422,7 +2425,8 @@ class VimTUIApp:
             preview = cfg.previews_dir / f"generated-style-{target.stem}.html"
             style_href = os.path.relpath(target, preview.parent).replace("\\", "/")
             preview.write_text(
-                tpl.format(
+                render_template_placeholders(
+                    tpl,
                     title=f"样式预览 {target.stem}",
                     blog_name="Generated Style",
                     subtitle="AI 生成样式预览",
@@ -2440,7 +2444,8 @@ class VimTUIApp:
 
         tpl = target.read_text(encoding="utf-8")
         preview = cfg.previews_dir / f"generated-framework-{target.stem}.html"
-        rendered = tpl.format(
+        rendered = render_template_placeholders(
+            tpl,
             title=f"框架预览 {target.stem}",
             blog_name="Generated Framework",
             subtitle="本html没有使用任何样式(css)",
@@ -2467,7 +2472,8 @@ class VimTUIApp:
             tpl = example.read_text(encoding="utf-8")
             preview = cfg.previews_dir / f"tmp-style-{name}.html"
             preview.write_text(
-                tpl.format(
+                render_template_placeholders(
+                    tpl,
                     title=f"临时样式预览 {name}",
                     blog_name="Preview",
                     subtitle="未保存版本",
@@ -2488,7 +2494,8 @@ class VimTUIApp:
             "</body>", "<p style='padding:16px;'>本html没有使用任何样式(css)</p></body>"
         )
         preview.write_text(
-            rendered.format(
+            render_template_placeholders(
+                rendered,
                 title=f"临时框架预览 {name}",
                 blog_name="Preview",
                 subtitle="未保存版本",
