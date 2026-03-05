@@ -1016,6 +1016,11 @@ class VimTUIApp:
             ),
             MenuItem("query_blogs", "查看已有博客", "查看已创建博客列表及其目录位置。"),
             MenuItem(
+                "check_update",
+                "检查版本更新",
+                "手动检查当前代码是否落后远端提交。",
+            ),
+            MenuItem(
                 "ai_generate",
                 "用内置 AI 生成样式/框架",
                 "交互式输入目标后，自动生成并保存模板文件。",
@@ -1391,6 +1396,8 @@ class VimTUIApp:
             self._action_config_openers()
         elif item.key == "query_blogs":
             self._action_query_blogs()
+        elif item.key == "check_update":
+            self._action_check_update()
         elif item.key == "ai_generate":
             self._action_ai_generate_assets()
         elif item.key == "edit_template":
@@ -2061,6 +2068,16 @@ class VimTUIApp:
         except Exception as exc:
             self._show_message("打开外部工具失败", [str(exc)])
 
+    def _action_check_update(self) -> None:
+        notice = self._run_with_busy("正在检查版本更新...", _detect_update_notice)
+        self.update_notice = notice
+        if notice:
+            self._log("版本检查：检测到当前版本落后")
+            self._show_message("发现可用更新", [notice])
+            return
+        self._log("版本检查：当前已是最新或暂时无法获取远端信息")
+        self._show_message("检查完成", ["当前未检测到落后提交。"])
+
     def _resolve_post_paths(
         self, post: dict[str, str]
     ) -> tuple[Path | None, Path | None]:
@@ -2527,14 +2544,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     workspace = Path(args.workspace).expanduser().resolve()
 
-    update_notice: str | None = None
     if shutil.which("git") is None:
         print("警告: 未检测到 git，提交功能将不可用")
-    else:
-        update_notice = _detect_update_notice()
 
     try:
-        return run_tui(workspace, no_browser=args.no_browser, update_notice=update_notice)
+        return run_tui(workspace, no_browser=args.no_browser)
     except KeyboardInterrupt:
         print("\n已取消")
         return 130
