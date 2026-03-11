@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import curses
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date as _date_cls
 from datetime import datetime
 from pathlib import Path
 import shlex
@@ -775,6 +777,102 @@ def list_existing_blogs(workspace: Path) -> list[dict[str, str]]:
         return []
 
 
+def _extract_existing_style_href(html: str) -> str:
+    """从 HTML 中提取现有 <link rel="stylesheet"> 的 href 值。"""
+    m = re.search(
+        r'<link[^>]+rel=["\']stylesheet["\'][^>]*\bhref=["\']([^"\']+)["\']'
+        r'|<link[^>]+\bhref=["\']([^"\']+)["\'][^>]+rel=["\']stylesheet["\']',
+        html,
+    )
+    if m:
+        return m.group(1) or m.group(2) or ""
+    return ""
+
+
+def _replace_stylesheet_href(html: str, new_href: str) -> str:
+    """替换 HTML 中 <link rel="stylesheet"> 的 href，不存在则在 </head> 前注入。"""
+    pattern = (
+        r'(<link\b[^>]*\brel=["\']stylesheet["\'][^>]*\bhref=["\'])[^"\']*(["\'][^>]*>)'
+        r'|(<link\b[^>]*\bhref=["\'])[^"\']*(["\'][^>]*\brel=["\']stylesheet["\'][^>]*>)'
+    )
+    replaced, n = re.subn(
+        pattern,
+        lambda m: (
+            m.group(1) + new_href + m.group(2)
+            if m.group(1)
+            else m.group(3) + new_href + m.group(4)
+        ),
+        html,
+        count=1,
+    )
+    if n == 0:
+        replaced = html.replace(
+            "</head>",
+            f'  <link rel="stylesheet" href="{new_href}" />\n</head>',
+            1,
+        )
+    return replaced
+
+
+def _restyle_one_post(
+    workspace: Path,
+    cfg: "BlogConfig",
+    slug: str,
+    style_name: str | None,
+    framework_name: str | None,
+) -> Path:
+    """改写单篇已有博客页面的 style/framework，原文内容保持不变。
+    style_name=None 表示不换样式，framework_name=None 表示不换框架。
+    返回写入的输出路径。
+    """
+    posts = list_existing_blogs(workspace)
+    post = next((p for p in posts if p.get("slug") == slug), None)
+    if post is None:
+        raise KeyError(f"未找到文章条目: {slug}")
+
+    page_url = post.get("page_url", "").strip() or f"{slug}/index.html"
+    out_path = (cfg.output_dir / page_url).resolve()
+    if not out_path.exists():
+        raise FileNotFoundError(f"页面文件不存在: {out_path.name}")
+
+    current_html = out_path.read_text(encoding="utf-8")
+    out_dir = out_path.parent
+
+    if framework_name:
+        # 需要 AI 提取内容，再套新模板
+        agent = BlogAgent(cfg)
+        extracted = agent.extract_page_content(current_html)
+        frameworks = list_frameworks(cfg.frameworks_dir)
+        tpl = frameworks[framework_name].read_text(encoding="utf-8")
+
+        if style_name:
+            style_href = os.path.relpath(
+                cfg.styles_dir / f"{style_name}.css", out_dir
+            ).replace("\\", "/")
+        else:
+            style_href = _extract_existing_style_href(current_html)
+
+        title = extracted.get("title") or slug
+        new_html = render_template_placeholders(
+            tpl,
+            title=title,
+            blog_name="AI Blog",
+            subtitle=extracted.get("subtitle") or "",
+            date=extracted.get("date") or _date_cls.today().isoformat(),
+            content_html=extracted.get("content_html") or "",
+            style_href=style_href,
+        )
+    else:
+        # 仅换样式：正则替换 href，无需 AI
+        new_href = os.path.relpath(
+            cfg.styles_dir / f"{style_name}.css", out_dir
+        ).replace("\\", "/")
+        new_html = _replace_stylesheet_href(current_html, new_href)
+
+    out_path.write_text(new_html, encoding="utf-8")
+    return out_path
+
+
 def cmd_refresh_home_index(
     workspace: Path, force_regenerate_summary: bool = False, quiet: bool = False
 ) -> Path:
@@ -1082,6 +1180,11 @@ class VimTUIApp:
                 "手动输入绝对路径，路径必须以 /content/ 结尾。",
             ),
             MenuItem("query_blogs", "查看已有博客", "查看已创建博客列表及其目录位置。"),
+            MenuItem(
+                "restyle_post",
+                "改写已有页面风格",
+                "选择一篇或多篇已有博客，用新的样式/框架重新渲染，原文内容保持不变。",
+            ),
             MenuItem(
                 "check_update",
                 "检查版本更新",
@@ -1468,6 +1571,8 @@ class VimTUIApp:
             self._action_set_content_dir()
         elif item.key == "query_blogs":
             self._action_query_blogs()
+        elif item.key == "restyle_post":
+            self._action_restyle_posts()
         elif item.key == "check_update":
             self._action_check_update()
         elif item.key == "ai_generate":
@@ -2161,6 +2266,354 @@ class VimTUIApp:
             self._log(f"查看博客：{post.get('slug', '-')}")
         except Exception as exc:
             self._show_message("打开外部工具失败", [str(exc)])
+
+    # ── 多选列表组件 ───────────────────────────────────────────────────────────
+
+    def _multi_choose_from_list(
+        self,
+        title: str,
+        items: list[tuple[str, str, bool, str]],
+        # (display_label, value, default_selected, skip_reason)
+        categories: list[str] | None = None,
+    ) -> list[str] | None:
+        """多选列表。返回被选中的 value 列表，None 表示用户取消。
+        键位: j/k 移动  Space 切换  a 强制全选  A 取消全选  c 按分类全选  Enter 确认  q 取消
+        """
+        selected: dict[str, bool] = {item[1]: item[2] for item in items}
+        idx = 0
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(6, 2, title, self.c_purple)
+            self._safe_addstr(
+                7, 2,
+                "j/k 移动  Space 切换  a 强制全选  A 取消全选  c 按分类全选  Enter 确认  q 取消",
+                self.c_text,
+            )
+            h, _ = self.stdscr.getmaxyx()
+            start_row = 9
+            max_visible = max(1, h - start_row - 4)
+
+            if idx < 0:
+                idx = 0
+            if idx >= len(items):
+                idx = len(items) - 1
+            offset = max(0, idx - max_visible + 1)
+
+            for i in range(offset, min(len(items), offset + max_visible)):
+                label, value, _, skip_reason = items[i]
+                is_sel = selected.get(value, False)
+                mark = "✓" if is_sel else " "
+                prefix = "❯" if i == idx else " "
+                row_style = self.c_focus if i == idx else self.c_text
+                skip_note = f"  ⚠ {skip_reason}" if skip_reason else ""
+                row_y = start_row + (i - offset)
+                self._safe_addstr(row_y, 2, f"{prefix} [{mark}] {label}{skip_note}", row_style)
+
+            sel_count = sum(1 for v in selected.values() if v)
+            footer_row = start_row + min(len(items), max_visible) + 1
+            self._safe_addstr(footer_row, 2, f"已选 {sel_count}/{len(items)} 篇  按 Enter 确认", self.c_blue)
+            self._draw_footer()
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (ord("j"), curses.KEY_DOWN):
+                idx = min(len(items) - 1, idx + 1)
+            elif key in (ord("k"), curses.KEY_UP):
+                idx = max(0, idx - 1)
+            elif key == ord(" "):
+                val = items[idx][1]
+                selected[val] = not selected.get(val, False)
+            elif key == ord("a"):
+                for _, val, _, _ in items:
+                    selected[val] = True
+            elif key == ord("A"):
+                for _, val, _, _ in items:
+                    selected[val] = False
+            elif key == ord("c"):
+                if categories:
+                    cat_items = [(c, c) for c in categories]
+                    chosen_cat = self._choose_from_list("按分类全选：选择分类", cat_items)
+                    if chosen_cat:
+                        cat_map = {item[1]: item for item in items}
+                        for label, val, _, _ in items:
+                            if f"[{chosen_cat}]" in label:
+                                selected[val] = True
+            elif key in (10, 13, curses.KEY_ENTER):
+                return [val for val, v in selected.items() if v]
+            elif key == ord("q"):
+                return None
+            elif key == ord("?"):
+                self._show_help()
+
+    # ── 并发批处理进度 ─────────────────────────────────────────────────────────
+
+    def _run_batch_with_progress(
+        self,
+        title: str,
+        tasks: list[tuple[str, "callable"]],
+        max_workers: int = 3,
+    ) -> list[tuple[str, object, Exception | None]]:
+        """并发执行 tasks，期间显示进度条。
+        tasks: [(key, fn), ...] 其中 fn 无参数。
+        返回: [(key, result, exc_or_None), ...]
+        """
+        total = len(tasks)
+        if total == 0:
+            return []
+
+        done_count = [0]
+        lock = threading.Lock()
+        results_list: list[tuple[str, object, Exception | None]] = []
+
+        def _wrapped(key: str, fn) -> None:
+            try:
+                res = fn()
+                with lock:
+                    results_list.append((key, res, None))
+            except Exception as exc:
+                with lock:
+                    results_list.append((key, None, exc))
+            finally:
+                with lock:
+                    done_count[0] += 1
+
+        width = 42
+        started = time.time()
+        with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
+            for key, fn in tasks:
+                executor.submit(_wrapped, key, fn)
+            while done_count[0] < total:
+                self.stdscr.clear()
+                self._draw_header()
+                self._safe_addstr(8, 4, title, self.c_purple)
+                done = done_count[0]
+                filled = int(width * done / total)
+                bar = "█" * filled + "·" * (width - filled)
+                self._safe_addstr(10, 4, f"[{bar}]", self.c_blue)
+                self._safe_addstr(12, 4, f"正在处理... ({done}/{total} 完成)", self.c_text)
+                if time.time() - started >= 60:
+                    self._safe_addstr(13, 4, "AI处理速度可能较慢，请耐心等待", self.c_red)
+                self._draw_footer()
+                self.stdscr.refresh()
+                time.sleep(0.1)
+
+        # 最终状态
+        self.stdscr.clear()
+        self._draw_header()
+        self._safe_addstr(8, 4, title, self.c_purple)
+        bar = "█" * width
+        self._safe_addstr(10, 4, f"[{bar}]", self.c_blue)
+        self._safe_addstr(12, 4, f"处理完成 ({total}/{total})", self.c_text)
+        self._draw_footer()
+        self.stdscr.refresh()
+        time.sleep(0.3)
+        return results_list
+
+    # ── 改写已有页面风格 ────────────────────────────────────────────────────────
+
+    def _action_restyle_posts(self) -> None:
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        posts = list_existing_blogs(self.workspace)
+        if not posts:
+            self._show_message("还没有已登记博客", ['先用"新建博客页"创建内容。'])
+            return
+
+        # ① 选择改写范围
+        scope = self._choose_from_list(
+            "改写风格：选择要改哪些",
+            [
+                ("样式和框架都换", "both"),
+                ("仅换样式（CSS）", "style"),
+                ("仅换框架（HTML 模板）", "framework"),
+            ],
+            default_idx=0,
+        )
+        if scope is None:
+            return
+        change_style = scope in {"both", "style"}
+        change_framework = scope in {"both", "framework"}
+
+        # ② 选目标 style
+        target_style: str | None = None
+        if change_style:
+            styles = list_styles(cfg.styles_dir)
+            style_items = [(name, name) for name in styles]
+            if not style_items:
+                self._show_message("没有可用样式", ["请先在 styles/ 目录中添加 CSS 文件。"])
+                return
+            target_style = self._choose_from_list("选择目标样式（CSS）", style_items, default_idx=0)
+            if target_style is None:
+                return
+
+        # ③ 选目标 framework
+        target_framework: str | None = None
+        if change_framework:
+            frameworks = list_frameworks(cfg.frameworks_dir)
+            frame_items = [(name, name) for name in frameworks]
+            if not frame_items:
+                self._show_message("没有可用框架", ["请先在 frameworks/ 目录中添加 HTML 模板文件。"])
+                return
+            target_framework = self._choose_from_list(
+                "选择目标框架（HTML 模板）", frame_items, default_idx=0
+            )
+            if target_framework is None:
+                return
+
+        # ④ 构建多选列表并做"已实现"检测
+        all_categories: list[str] = []
+        multi_items: list[tuple[str, str, bool, str]] = []
+        for post in posts:
+            slug = post.get("slug", "")
+            if not slug:
+                continue
+            category = post.get("category", "-")
+            if category not in all_categories:
+                all_categories.append(category)
+            cur_style = post.get("style", "__default__")
+            cur_framework = post.get("framework", "__default__")
+            page_url = post.get("page_url", "").strip()
+
+            label = f"[{category}] {slug}  (当前: {cur_style} / {cur_framework})"
+
+            # 页面文件不存在 → 不可选
+            out_path = cfg.output_dir / page_url if page_url else None
+            if not out_path or not (cfg.output_dir / page_url).exists():
+                multi_items.append((label, slug, False, "页面文件不存在"))
+                continue
+
+            # 检测是否已是目标风格
+            style_match = change_style and (cur_style == target_style)
+            frame_match = change_framework and (cur_framework == target_framework)
+            if change_style and change_framework and style_match and frame_match:
+                skip_reason = "已是目标风格，自动跳过"
+            elif change_style and not change_framework and style_match:
+                skip_reason = "样式已是目标，自动跳过"
+            elif change_framework and not change_style and frame_match:
+                skip_reason = "框架已是目标，自动跳过"
+            else:
+                skip_reason = ""
+
+            multi_items.append((label, slug, not bool(skip_reason), skip_reason))
+
+        if not multi_items:
+            self._show_message("没有可改写的文章", ["index.json 中没有有效条目。"])
+            return
+
+        selected_slugs = self._multi_choose_from_list(
+            "选择要改写的文章（Space 切换，a 强制全选，A 取消全选，c 按分类）",
+            multi_items,
+            categories=all_categories,
+        )
+        if selected_slugs is None:
+            return
+        if not selected_slugs:
+            self._show_message("未选择任何文章", ["请至少选中一篇文章再确认。"])
+            return
+
+        # ⑤ 确认
+        scope_desc_map = {
+            "both": f"样式→{target_style}  框架→{target_framework}",
+            "style": f"样式→{target_style}",
+            "framework": f"框架→{target_framework}",
+        }
+        scope_desc = scope_desc_map[scope]
+        confirm = self._choose_from_list(
+            f"即将改写 {len(selected_slugs)} 篇文章",
+            [
+                (f"确认（{scope_desc}）", "yes"),
+                ("取消", "no"),
+            ],
+            default_idx=0,
+        )
+        if confirm != "yes":
+            return
+
+        # ⑥ 并发处理
+        tasks = [
+            (
+                slug,
+                lambda s=slug: _restyle_one_post(
+                    self.workspace, cfg, s, target_style, target_framework
+                ),
+            )
+            for slug in selected_slugs
+        ]
+        batch_results = self._run_batch_with_progress(
+            f"正在改写 {len(selected_slugs)} 篇文章...",
+            tasks,
+            max_workers=3,
+        )
+
+        # ⑦ 更新 index.json（仅成功项）
+        successes = [key for key, _, exc in batch_results if exc is None]
+        failures = [(key, str(exc)) for key, _, exc in batch_results if exc is not None]
+        if successes:
+            index_path = self.workspace / "index.json"
+            data = _read_index_data(index_path)
+            for p in data.get("posts", []):
+                if p.get("slug") in successes:
+                    if target_style:
+                        p["style"] = target_style
+                    if target_framework:
+                        p["framework"] = target_framework
+            index_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+        self._log(f"改写风格完成：成功 {len(successes)} 篇，失败 {len(failures)} 篇")
+
+        # ⑧ 结果摘要 + 可选预览
+        result_lines: list[str] = [
+            f"✓ 成功改写: {len(successes)} 篇",
+            f"✗ 失败: {len(failures)} 篇",
+        ]
+        if failures:
+            result_lines.append("")
+            result_lines.append("失败详情:")
+            for slug, msg in failures:
+                result_lines.append(f"  {slug}: {msg[:60]}")
+        if successes:
+            result_lines += ["", "按 p 在浏览器预览第一篇成功改写的页面，q 关闭。"]
+
+        while True:
+            self.stdscr.clear()
+            self._draw_header()
+            self._safe_addstr(6, 2, "改写风格完成", self.c_purple)
+            for i, line in enumerate(result_lines):
+                if line.startswith("✓"):
+                    col = self.c_blue
+                elif line.startswith("✗") or (line.startswith("  ") and ": " in line):
+                    col = self.c_red
+                else:
+                    col = self.c_text
+                self._safe_addstr(8 + i, 4, line, col)
+            self._draw_footer()
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key == ord("q"):
+                return
+            if key == ord("p") and successes:
+                first_slug = successes[0]
+                post_map_now = {
+                    p["slug"]: p
+                    for p in list_existing_blogs(self.workspace)
+                    if p.get("slug")
+                }
+                first_post = post_map_now.get(first_slug)
+                if first_post:
+                    pu = first_post.get("page_url", "")
+                    op = cfg.output_dir / pu if pu else None
+                    if op and op.exists():
+                        try:
+                            webbrowser.open(op.resolve().as_uri())
+                        except Exception:
+                            pass
+            if key == ord("?"):
+                self._show_help()
 
     def _action_check_update(self) -> None:
         notice = self._run_with_busy("正在检查版本更新...", _detect_update_notice)

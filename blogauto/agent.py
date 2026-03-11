@@ -157,6 +157,38 @@ class BlogAgent:
         )
         return self._strip_code_fence(text)
 
+    def extract_page_content(self, current_html: str) -> dict[str, str]:
+        """从已有博客 HTML 中提取结构化内容（title/subtitle/date/content_html）。
+        严格保留原文，用于风格改写时的内容迁移。
+        """
+        provider = create_provider(self.config)
+        html_snippet = current_html[:18000]
+        prompt = (
+            "从以下博客 HTML 中提取结构化内容，返回 JSON。\n"
+            "JSON 必须包含以下字段：\n"
+            "  title: 文章标题（字符串）\n"
+            "  subtitle: 文章副标题或简介（字符串，没有则填空字符串）\n"
+            "  date: 发布日期（字符串，没有则填空字符串）\n"
+            "  content_html: 文章正文 HTML。\n"
+            "    提取规则：\n"
+            "    - 只提取 <article> 或正文区域内的内容\n"
+            "    - 不包含页面大标题(<h1>文章名</h1>)、副标题、日期、导航栏、页脚等页面框架元素\n"
+            "    - 必须保留原文所有文字，一字不差\n"
+            "    - 保留原有段落 HTML 标签（<p>、<h2>、<ul>、<code> 等）\n"
+            "严格禁止修改、增加或删除任何正文文字。\n"
+            "只输出 JSON，不加任何解释和代码块标记。\n\n"
+            f"HTML:\n{html_snippet}"
+        )
+        text = provider.chat(
+            system_prompt="你是博客内容提取助手，严格保留原文内容，输出纯 JSON。",
+            user_prompt=prompt,
+            temperature=0.1,
+        )
+        try:
+            return self._parse_json_content(text)
+        except Exception:
+            return {"title": "", "subtitle": "", "date": "", "content_html": ""}
+
     def _build_homepage_style_prompt(self, style_name: str) -> str:
         style_path = self.config.styles_dir / f"{style_name}.css"
         if not style_path.exists():
