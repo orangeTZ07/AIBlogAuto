@@ -124,7 +124,7 @@ class BlogBuilder:
         return f"{slug}/index.html"
 
     def _discover_posts(self) -> list[tuple[str, Path, dict[str, str]]]:
-        root_index = self.config.workspace / "index.json"
+        root_index = self.config.index_path
         discovered: list[tuple[str, Path, dict[str, str]]] = []
         seen: set[Path] = set()
 

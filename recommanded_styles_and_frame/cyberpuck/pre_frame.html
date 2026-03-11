@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>文章主标题 · 赛博朋克博客框架</title>
+    <!--
+      说明：
+      1. 本文件刻意不包含任何 CSS，仅提供信息密集、可扩展的 HTML 结构。
+      2. 赛博朋克配色、发光效果、霓虹边框、扫描线、粒子动画等效果
+         请在单独的 CSS / JS 文件中实现。
+      3. 所有 class / id 命名都为后续动效和布局预留了挂载点。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <link rel="stylesheet" href="./pre_frame.css" />
+  </head>
+
+  <body class="cyber-shell">
+    <!-- 顶部主标题栏：大标题 + 元信息 + 快速导航 -->
+    <header class="page-header" id="top">
+      <div class="header-inner">
+        <div class="header-main">
+          <!--
+            一键返回主页：
+            - 最简单做法：把 href 写成站点根路径，例如 "/" 或 "/index.html"。
+            - 如果文章路径类似 "/blog/tech/post.html"，去掉最后一级仅得到 "/blog/tech/"，
+              这通常还是分类页，不一定是站点主页。
+            - 推荐：根据你的站点结构，统一约定主页路径，然后固定写在这里，
+              或者使用 JS 读取 data-home-url 属性动态跳转。
+          -->
+          <a class="home-gate" href="/" data-home-url="/">
+            <span class="home-gate-label">返回主页</span>
+          </a>
+
+          <div class="title-block">
+            <p class="article-series-label">系列 / 分类名</p>
+            <h1 class="article-main-title">这里是文章主标题</h1>
+            <p class="article-subtitle">
+              一句简短而酷炫的副标题，概括这篇文章的核心赛博主题。
+            </p>
+          </div>
+
+          <div class="header-meta">
+            <span class="meta-item meta-date">发布日期：2026-03-11</span>
+            <span class="meta-item meta-author">作者：某某</span>
+            <span class="meta-item meta-reading-time">预计阅读：12 分钟</span>
+            <span class="meta-item meta-tags">标签：#赛博朋克 #技术随笔</span>
+          </div>
+        </div>
+
+        <!-- 顶部快速导航：锚点跳转，后续可做滑动/渐隐等动效 -->
+        <nav class="header-quick-nav" aria-label="顶部快捷导航">
+          <button class="quick-nav-item" data-target="#outline">目录</button>
+          <button class="quick-nav-item" data-target="#article-top">正文</button>
+          <button class="quick-nav-item" data-target="#comments">评论区</button>
+          <button class="quick-nav-item" data-target="#bottom">页尾</button>
+        </nav>
+      </div>
+    </header>
+
+    <!-- 三栏布局：左侧目录导航 + 中间正文 + （预留）右侧信息栏 -->
+    <div class="layout-root" id="article-top">
+      <!-- 左侧：目录导航（支持标题导航） -->
+      <aside class="sidebar sidebar-left sidebar-toc" aria-label="文章目录">
+        <div class="toc-header">
+          <h2 class="toc-title">目录导航</h2>
+          <button class="toc-toggle" aria-expanded="true">折叠</button>
+        </div>
+
+        <nav class="toc-body" id="outline">
+          <!--
+            建议用 JS 扫描正文中的 h2/h3 自动生成这棵树，
+            这里先给出一个信息密集的示例结构。
+          -->
+          <ol class="toc-level-1">
+            <li class="toc-item">
+              <a href="#section-intro">1. 引子：赛博之门</a>
+            </li>
+            <li class="toc-item">
+              <a href="#section-context">2. 背景设定：霓虹城市</a>
+              <ol class="toc-level-2">
+                <li class="toc-item">
+                  <a href="#section-context-grid">2.1 信息格网</a>
+                </li>
+                <li class="toc-item">
+                  <a href="#section-context-protocol">2.2 协议与黑客</a>
+                </li>
+              </ol>
+            </li>
+            <li class="toc-item">
+              <a href="#section-mainline">3. 主线：从现实到赛博</a>
+              <ol class="toc-level-2">
+                <li class="toc-item">
+                  <a href="#section-mainline-arch">3.1 架构与模块</a>
+                </li>
+                <li class="toc-item">
+                  <a href="#section-mainline-ux">3.2 交互与幻觉</a>
+                </li>
+              </ol>
+            </li>
+            <li class="toc-item">
+              <a href="#section-deep-dive">4. 深潜：代码与精神</a>
+            </li>
+            <li class="toc-item">
+              <a href="#section-outro">5. 结语：从终端回到现实</a>
+            </li>
+          </ol>
+        </nav>
+
+        <!-- 左侧下方可以塞更多信息密集的小组件 -->
+        <section class="sidebar-widgets">
+          <div class="widget widget-progress">
+            <h3 class="widget-title">阅读进度</h3>
+            <div class="widget-body">
+              <!-- 预留进度条 / 百分比数字位 -->
+              <p class="progress-text">当前进度：0%</p>
+            </div>
+          </div>
+
+          <div class="widget widget-keypoints">
+            <h3 class="widget-title">关键节点</h3>
+            <ul class="widget-list">
+              <li class="widget-item">赛博城市设定</li>
+              <li class="widget-item">核心技术栈</li>
+              <li class="widget-item">交互与动效策略</li>
+              <li class="widget-item">可扩展性与维护</li>
+            </ul>
+          </div>
+        </section>
+      </aside>
+
+      <!-- 中间：正文区域（信息密集） -->
+      <main class="content-main" role="main">
+        <article class="article-body">
+          <!-- 次级标题栏：面包屑 + 提要 -->
+          <header class="article-header-secondary">
+            <nav class="breadcrumbs" aria-label="面包屑导航">
+              <a href="/" class="breadcrumb-link">主页</a>
+              <span class="breadcrumb-separator">/</span>
+              <a href="/blog" class="breadcrumb-link">博客</a>
+              <span class="breadcrumb-separator">/</span>
+              <a href="/blog/cyberpunk" class="breadcrumb-link">赛博朋克专栏</a>
+              <span class="breadcrumb-separator">/</span>
+              <span class="breadcrumb-current">当前文章</span>
+            </nav>
+
+            <section class="article-summary">
+              <h2 class="summary-title">内容提要</h2>
+              <p class="summary-text">
+                这里用几句话概括文章的核心思想、技术要点和阅读收获，方便读者快速判断是否深入阅读。
+              </p>
+            </section>
+          </header>
+
+          <!-- 正文分节：每个 section 对应目录中的一个节点 -->
+          <section
+            id="section-intro"
+            class="article-section section-intro"
+          >
+            <h2 class="section-title">引子：赛博之门</h2>
+            <p class="section-lead">
+              在现实与虚拟的交界，一个页面就是一扇小小的赛博之门。
+              本节简要交代写作动机和整体基调。
+            </p>
+            <p>
+              这里是正文内容占位。后续你可以填充具体的故事、背景或技术导入，
+              使用短句和小段落提升信息密度，并通过样式控制可读性。
+            </p>
+          </section>
+
+          <section
+            id="section-context"
+            class="article-section section-context"
+          >
+            <h2 class="section-title">背景设定：霓虹城市</h2>
+            <p class="section-lead">
+              描述你想象中的赛博城市：高楼、霓虹、噪点、数据流，以此给后文的设计语言和动效提供视觉锚点。
+            </p>
+
+            <section
+              id="section-context-grid"
+              class="article-subsection"
+            >
+              <h3 class="subsection-title">信息格网</h3>
+              <p>
+                解释你在页面布局中如何借用「城市格网」的概念，例如多列布局、密集信息块、网格化导航等。
+              </p>
+            </section>
+
+            <section
+              id="section-context-protocol"
+              class="article-subsection"
+            >
+              <h3 class="subsection-title">协议与黑客</h3>
+              <p>
+                可以在这里讲讲协议、接口、数据流，或者你对「黑客精神」在交互设计中的理解。
+              </p>
+            </section>
+          </section>
+
+          <section
+            id="section-mainline"
+            class="article-section section-mainline"
+          >
+            <h2 class="section-title">主线：从现实到赛博</h2>
+
+            <section
+              id="section-mainline-arch"
+              class="article-subsection"
+            >
+              <h3 class="subsection-title">架构与模块</h3>
+              <p>
+                对页面整体架构进行技术拆分：布局模块、动效模块、主题皮肤、数据层等。
+              </p>
+              <ul class="bullet-list">
+                <li>布局层（Layout）：负责多栏布局与响应式栅格。</li>
+                <li>视觉层（Skin）：负责赛博配色、发光、噪点、渐变。</li>
+                <li>动效层（Motion）：负责滚动、渐显、粒子、扫描线等动画。</li>
+                <li>数据层（Data）：负责目录生成、阅读进度、评论等数据交互。</li>
+              </ul>
+            </section>
+
+            <section
+              id="section-mainline-ux"
+              class="article-subsection"
+            >
+              <h3 class="subsection-title">交互与幻觉</h3>
+              <p>
+                在这里可以写下你对「丝滑动画」和「赛博幻觉」的交互设计策略，
+                后续通过 CSS transition / animation 甚至 WebGL 实现。
+              </p>
+            </section>
+          </section>
+
+          <section
+            id="section-deep-dive"
+            class="article-section section-deep-dive"
+          >
+            <h2 class="section-title">深潜：代码与精神</h2>
+            <p>
+              用更技术化的角度深入讨论实现细节，比如组件划分、状态管理、性能优化等。
+            </p>
+          </section>
+
+          <section
+            id="section-outro"
+            class="article-section section-outro"
+          >
+            <h2 class="section-title">结语：从终端回到现实</h2>
+            <p>
+              收束全文，给出实践建议、延伸阅读或个人反思。
+            </p>
+          </section>
+
+          <!-- 文章页脚：标签、上下篇等 -->
+          <footer class="article-footer">
+            <section class="article-tags">
+              <h2 class="article-footer-title">标签</h2>
+              <ul class="tag-list">
+                <li class="tag-item">
+                  <a href="/tags/cyberpunk">赛博朋克</a>
+                </li>
+                <li class="tag-item">
+                  <a href="/tags/frontend">前端设计</a>
+                </li>
+                <li class="tag-item">
+                  <a href="/tags/ux">交互体验</a>
+                </li>
+              </ul>
+            </section>
+
+            <section class="article-nav">
+              <h2 class="article-footer-title">继续阅读</h2>
+              <div class="article-nav-inner">
+                <a class="article-prev" href="/blog/prev-article.html">
+                  ← 上一篇：上一篇文章��题
+                </a>
+                <a class="article-next" href="/blog/next-article.html">
+                  下一篇：下一篇文章标题 →
+                </a>
+              </div>
+            </section>
+          </footer>
+        </article>
+
+        <!-- 正文右下方：可选的补充信息面板（信息密集） -->
+        <section class="article-extra-panels">
+          <div class="extra-panel extra-panel-notes">
+            <h2 class="extra-panel-title">开发笔记</h2>
+            <ul class="extra-panel-list">
+              <li>布局栅格方案选型与权衡。</li>
+              <li>动画性能与降级策略。</li>
+              <li>不同主题皮肤的配置方式。</li>
+            </ul>
+          </div>
+
+          <div class="extra-panel extra-panel-links">
+            <h2 class="extra-panel-title">参考链接</h2>
+            <ul class="extra-panel-list">
+              <li>赛博朋克 UI 灵感站点 A</li>
+              <li>前端动画库或文章 B</li>
+              <li>交互与体验设计书籍或论文 C</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 评论区占位 -->
+        <section
+          id="comments"
+          class="article-comments"
+          aria-label="评论与讨论"
+        >
+          <h2 class="comments-title">评论与讨论</h2>
+
+          <form class="comment-form">
+            <div class="form-row">
+              <label for="comment-author">昵称</label>
+              <input
+                id="comment-author"
+                name="author"
+                type="text"
+                autocomplete="name"
+              />
+            </div>
+            <div class="form-row">
+              <label for="comment-content">评论内容</label>
+              <textarea id="comment-content" name="content" rows="4"></textarea>
+            </div>
+            <div class="form-row form-row-actions">
+              <button type="submit" class="btn-submit-comment">
+                发送评论
+              </button>
+            </div>
+          </form>
+
+          <div class="comment-list" aria-live="polite">
+            <!-- 这里是评论列表占位 -->
+            <article class="comment-item">
+              <header class="comment-header">
+                <span class="comment-author">访客 A</span>
+                <time
+                  class="comment-time"
+                  datetime="2026-03-11T20:00:00"
+                >
+                  刚刚
+                </time>
+              </header>
+              <p class="comment-body">
+                这里是评论内容示例。实际使用时由后端或前端渲染。
+              </p>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <!-- 右侧栏：可选信息区，预留做为实时状态/在线用户/小挂件等 -->
+      <aside
+        class="sidebar sidebar-right sidebar-info"
+        aria-label="辅助信息"
+      >
+        <section class="widget widget-status">
+          <h2 class="widget-title">系统状态</h2>
+          <ul class="widget-list">
+            <li class="widget-item">连接：稳定</li>
+            <li class="widget-item">延迟：42ms</li>
+            <li class="widget-item">模式：赛博阅读</li>
+          </ul>
+        </section>
+
+        <section class="widget widget-shortcuts">
+          <h2 class="widget-title">快捷操作</h2>
+          <ul class="widget-list">
+            <li class="widget-item">
+              <a href="#top">回到顶部</a>
+            </li>
+            <li class="widget-item">
+              <a href="#section-deep-dive">跳到深潜</a>
+            </li>
+            <li class="widget-item">
+              <a href="#comments">跳到评论区</a>
+            </li>
+          </ul>
+        </section>
+      </aside>
+    </div>
+
+    <!-- 页脚：全局信息 -->
+    <footer class="page-footer" id="bottom">
+      <div class="footer-inner">
+        <section class="footer-section footer-about">
+          <h2 class="footer-title">关于本站</h2>
+          <p>
+            一句关于你的博客或个人品牌的介绍文字，这里是赛博朋克风格的聚集地。
+          </p>
+        </section>
+
+        <section class="footer-section footer-links">
+          <h2 class="footer-title">导航</h2>
+          <ul class="footer-link-list">
+            <li>
+              <a href="/">主页</a>
+            </li>
+            <li>
+              <a href="/blog">全部文章</a>
+            </li>
+            <li>
+              <a href="/about">关于作者</a>
+            </li>
+          </ul>
+        </section>
+
+        <section class="footer-section footer-meta">
+          <h2 class="footer-title">系统信息</h2>
+          <p class="footer-meta-text">
+            Powered by 你的技术栈 · 主题：赛博朋克实验版
+          </p>
+        </section>
+      </div>
+    </footer>
+
+    <!--
+      可选：后续可以在这里挂 JS 脚本（例如：
+      - 目录自动生成
+      - 平滑滚动与滚动进度
+      - 动画触发与视差效果
+      当前版本已经提供基础脚本，放在 pre_frame.js 中。
+    -->
+    <script src="./pre_frame.js"></script>
+  </body>
+</html>

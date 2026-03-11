@@ -175,6 +175,8 @@ class BlogAgent:
             "    - 不包含页面大标题(<h1>文章名</h1>)、副标题、日期、导航栏、页脚等页面框架元素\n"
             "    - 必须保留原文所有文字，一字不差\n"
             "    - 保留原有段落 HTML 标签（<p>、<h2>、<ul>、<code> 等）\n"
+            "    - 严禁在 content_html 中包含任何 <style> 标签或 style= 内联属性\n"
+            "    - 严禁在 content_html 中包含任何 <script> 标签\n"
             "严格禁止修改、增加或删除任何正文文字。\n"
             "只输出 JSON，不加任何解释和代码块标记。\n\n"
             f"HTML:\n{html_snippet}"

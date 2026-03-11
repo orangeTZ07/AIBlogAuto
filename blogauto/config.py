@@ -37,6 +37,10 @@ class BlogConfig:
         return self.content_dir
 
     @property
+    def index_path(self) -> Path:
+        return self.content_dir / "index.json"
+
+    @property
     def styles_dir(self) -> Path:
         return self.content_dir / "styles"
 

@@ -175,8 +175,17 @@ def _detect_update_notice() -> str | None:
     return f"检测到新版本：当前分支落后 {behind} 个提交，建议执行 git pull。"
 
 
-def _upsert_index_entry(workspace: Path, entry: dict[str, str]) -> None:
-    index_path = workspace / "index.json"
+def _migrate_index_if_needed(workspace: Path, cfg: "BlogConfig") -> None:
+    """将旧版 workspace/index.json 迁移到 content_dir/index.json（如有）。"""
+    old_path = workspace / "index.json"
+    new_path = cfg.index_path
+    if old_path.exists() and not new_path.exists():
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(old_path.read_text(encoding="utf-8"), encoding="utf-8")
+        old_path.unlink()
+
+
+def _upsert_index_entry(index_path: Path, entry: dict[str, str]) -> None:
     data = {"posts": []}
     if index_path.exists():
         try:
@@ -474,7 +483,7 @@ def seed_example(cfg: BlogConfig) -> None:
             encoding="utf-8",
         )
     _upsert_index_entry(
-        cfg.workspace,
+        cfg.index_path,
         {
             "slug": "welcome",
             "summary": "",
@@ -572,7 +581,7 @@ def cmd_build_homepage_with_ai(
 ) -> Path:
     cfg = load_config(workspace)
     _ensure_homepage_prompts(cfg)
-    index_path = cfg.workspace / "index.json"
+    index_path = cfg.index_path
     if not index_path.exists():
         raise FileNotFoundError("未找到 index.json，先创建文章草稿再生成主页。")
     posts_json = index_path.read_text(encoding="utf-8")
@@ -740,7 +749,7 @@ def cmd_new_post(
     )
 
     _upsert_index_entry(
-        cfg.workspace,
+        cfg.index_path,
         {
             "slug": slug,
             "summary": "",
@@ -765,8 +774,9 @@ def cmd_new_post(
     }
 
 
-def list_existing_blogs(workspace: Path) -> list[dict[str, str]]:
-    index_path = workspace / "index.json"
+def list_existing_blogs(cfg: "BlogConfig") -> list[dict[str, str]]:
+    _migrate_index_if_needed(cfg.workspace, cfg)
+    index_path = cfg.index_path
     if not index_path.exists():
         return []
     try:
@@ -825,7 +835,7 @@ def _restyle_one_post(
     style_name=None 表示不换样式，framework_name=None 表示不换框架。
     返回写入的输出路径。
     """
-    posts = list_existing_blogs(workspace)
+    posts = list_existing_blogs(cfg)
     post = next((p for p in posts if p.get("slug") == slug), None)
     if post is None:
         raise KeyError(f"未找到文章条目: {slug}")
@@ -853,13 +863,19 @@ def _restyle_one_post(
             style_href = _extract_existing_style_href(current_html)
 
         title = extracted.get("title") or slug
+        # 清理 AI 提取内容中可能残留的嵌入样式，防止覆盖目标 CSS
+        content_html = extracted.get("content_html") or ""
+        content_html = re.sub(r"(?is)<style[^>]*>.*?</style>", "", content_html)
+        content_html = re.sub(r"(?is)<script[^>]*>.*?</script>", "", content_html)
+        content_html = re.sub(r'\s+style="[^"]*"', "", content_html)
+        content_html = re.sub(r"\s+style='[^']*'", "", content_html)
         new_html = render_template_placeholders(
             tpl,
             title=title,
             blog_name="AI Blog",
             subtitle=extracted.get("subtitle") or "",
             date=extracted.get("date") or _date_cls.today().isoformat(),
-            content_html=extracted.get("content_html") or "",
+            content_html=content_html,
             style_href=style_href,
         )
     else:
@@ -877,7 +893,8 @@ def cmd_refresh_home_index(
     workspace: Path, force_regenerate_summary: bool = False, quiet: bool = False
 ) -> Path:
     cfg = load_config(workspace)
-    index_path = workspace / "index.json"
+    _migrate_index_if_needed(workspace, cfg)
+    index_path = cfg.index_path
     if not index_path.exists():
         raise FileNotFoundError("未找到 index.json，先创建文章草稿。")
     data = json.loads(index_path.read_text(encoding="utf-8"))
@@ -966,7 +983,8 @@ def cmd_rescan_content_to_index(
     workspace: Path, quiet: bool = False
 ) -> tuple[Path, int, int]:
     cfg = load_config(workspace)
-    index_path = workspace / "index.json"
+    _migrate_index_if_needed(workspace, cfg)
+    index_path = cfg.index_path
     data = _read_index_data(index_path)
 
     def _norm_key(value: str) -> str:
@@ -1740,7 +1758,7 @@ class VimTUIApp:
         frames = list_frameworks(cfg.frameworks_dir)
         style_choice = self._choose_from_list(
             "这篇文章用什么样式？",
-            [("使用默认样式（来自“换一个页面风格”）", "__default__")]
+            [('使用默认样式（来自"换一个页面风格"）', "__default__")]
             + [
                 (f"{n} [来源: {self._fmt_path(p)}]", n)
                 for n, p in styles.items()
@@ -1751,7 +1769,7 @@ class VimTUIApp:
             return
         frame_choice = self._choose_from_list(
             "这篇文章用什么框架？",
-            [("使用默认框架（来自“换一个页面风格”）", "__default__")]
+            [('使用默认框架（来自"换一个页面风格"）', "__default__")]
             + [
                 (
                     f"{n}（一个 HTML 布局模板等内容） [来源: {self._fmt_path(p)}]",
@@ -1795,7 +1813,7 @@ class VimTUIApp:
             return
         cfg = load_config(self.workspace)
         _ensure_homepage_prompts(cfg)
-        index_file = self.workspace / "index.json"
+        index_file = cfg.index_path
         before = _read_index_data(index_file)
         has_existing_summary = any(
             str(x.get("summary", "")).strip() for x in before.get("posts", [])
@@ -1835,7 +1853,7 @@ class VimTUIApp:
         self._show_message(
             "主页索引更新完成",
             [
-                f"索引文件: {index_path.relative_to(self.workspace)}",
+                f"索引文件: {self._fmt_path(index_path)}",
                 "每篇文章已确保包含 page_url=<文章目录>/index.html",
                 "每篇文章已补充 summary（my_blog.txt 优先，不存在则读取 index.html）",
                 f"AI 已同步更新主页: {self._fmt_path(home_path)}",
@@ -1856,7 +1874,7 @@ class VimTUIApp:
         self._show_message(
             "迁移扫描完成",
             [
-                f"索引文件: {index_path.relative_to(self.workspace)}",
+                f"索引文件: {self._fmt_path(index_path)}",
                 f"扫描目录: {self._fmt_path(cfg.content_dir)}",
                 f"新增条目: {added}",
                 f"删除失效条目: {removed}",
@@ -1980,7 +1998,7 @@ class VimTUIApp:
             "正在处理：同步索引并补全摘要...",
             lambda: cmd_refresh_home_index(self.workspace, quiet=True),
         )
-        index_path = self.workspace / "index.json"
+        index_path = cfg.index_path
         posts_json = index_path.read_text(encoding="utf-8")
         fields_prompt = (
             cfg.prompts_dir / "homepage-index-fields.prompt.txt"
@@ -2223,9 +2241,10 @@ class VimTUIApp:
     def _action_query_blogs(self) -> None:
         if not self._ensure_ready():
             return
-        posts = list_existing_blogs(self.workspace)
+        cfg = load_config(self.workspace)
+        posts = list_existing_blogs(cfg)
         if not posts:
-            self._show_message("还没有已登记博客", ["先用“新建博客页”创建内容。"])
+            self._show_message("还没有已登记博客", ['先用"新建博客页"创建内容。'])
             return
 
         items = []
@@ -2240,8 +2259,7 @@ class VimTUIApp:
         if picked is None:
             return
         post = posts[int(picked)]
-        cfg = load_config(self.workspace)
-        article_path, folder_path = self._resolve_post_paths(post)
+        article_path, folder_path = self._resolve_post_paths(post, cfg)
         if article_path is None and folder_path is None:
             self._show_message("无法打开", ["该条目未记录可用路径。"])
             return
@@ -2416,7 +2434,7 @@ class VimTUIApp:
         if not self._ensure_ready():
             return
         cfg = load_config(self.workspace)
-        posts = list_existing_blogs(self.workspace)
+        posts = list_existing_blogs(cfg)
         if not posts:
             self._show_message("还没有已登记博客", ['先用"新建博客页"创建内容。'])
             return
@@ -2551,7 +2569,7 @@ class VimTUIApp:
         successes = [key for key, _, exc in batch_results if exc is None]
         failures = [(key, str(exc)) for key, _, exc in batch_results if exc is not None]
         if successes:
-            index_path = self.workspace / "index.json"
+            index_path = cfg.index_path
             data = _read_index_data(index_path)
             for p in data.get("posts", []):
                 if p.get("slug") in successes:
@@ -2600,7 +2618,7 @@ class VimTUIApp:
                 first_slug = successes[0]
                 post_map_now = {
                     p["slug"]: p
-                    for p in list_existing_blogs(self.workspace)
+                    for p in list_existing_blogs(cfg)
                     if p.get("slug")
                 }
                 first_post = post_map_now.get(first_slug)
@@ -2626,7 +2644,7 @@ class VimTUIApp:
         self._show_message("检查完成", ["当前未检测到落后提交。"])
 
     def _resolve_post_paths(
-        self, post: dict[str, str]
+        self, post: dict[str, str], cfg: "BlogConfig | None" = None
     ) -> tuple[Path | None, Path | None]:
         article_text = str(post.get("article_file", "")).strip()
         draft_text = str(post.get("draft_dir", "")).strip()
@@ -2646,6 +2664,21 @@ class VimTUIApp:
                     txt = cand / "my_blog.txt"
                     if txt.exists() and txt.is_file():
                         article_path = txt
+
+        # Custom 类型：通过 page_url 定位页面目录
+        if article_path is None and folder_path is None:
+            page_url = str(post.get("page_url", "")).strip()
+            if page_url:
+                if cfg is None:
+                    try:
+                        cfg = load_config(self.workspace)
+                    except Exception:
+                        cfg = None
+                if cfg is not None:
+                    page_file = (cfg.content_dir / page_url).resolve()
+                    if page_file.exists() and page_file.is_file():
+                        folder_path = page_file.parent
+
         return article_path, folder_path
 
     def _action_config_openers(self) -> None:
