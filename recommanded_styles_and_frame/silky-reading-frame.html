@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>主标题</title>
+</head>
+<body>
+  <header id="page-header">
+    <h1>主标题</h1>
+  </header>
+
+  <main id="layout-root">
+    <aside id="toc-panel" aria-label="目录与阅读进度">
+      <h2>目录</h2>
+      <nav>
+        <ol id="toc-list">
+          <!-- h2/h3 自动生成 -->
+        </ol>
+      </nav>
+      <section id="reading-progress" aria-label="阅读进度">
+        <p>进度：<span id="progress-value">0%</span></p>
+      </section>
+    </aside>
+
+    <article id="article-body">
+      <section>
+        <h2>部分一</h2>
+        <p>简要内容。</p>
+      </section>
+
+      <section>
+        <h2>部分二</h2>
+        <h3>要点 2.1</h3>
+        <p>关键要点。</p>
+      </section>
+
+      <section>
+        <h2>总结</h2>
+        <p>结论与行动。</p>
+      </section>
+    </article>
+  </main>
+
+  <footer id="page-footer">
+    <p>可复用框架。</p>
+  </footer>
+
+  <script>
+    function slideIn(el, direction, delayMs, durationMs) {
+      if (!el) return;
+      const startTime = performance.now() + delayMs;
+      const distance = 50;
+      const initial = {opacity: 0, x: 0, y: 0};
+      switch (direction) {
+        case "top":    initial.y = -distance; break;
+        case "bottom": initial.y =  distance; break;
+        case "left":   initial.x = -distance; break;
+        case "right":  initial.x =  distance; break;
+      }
+      el.style.opacity = "0";
+      el.style.transform = "translate(" + initial.x + "px," + initial.y + "px)";
+
+      function frame(now) {
+        if (now < startTime) {
+          requestAnimationFrame(frame);
+          return;
+        }
+        const t = Math.min((now - startTime) / durationMs, 1);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const currentX = initial.x * (1 - eased);
+        const currentY = initial.y * (1 - eased);
+        el.style.transform = "translate(" + currentX + "px," + currentY + "px)";
+        el.style.opacity = String(eased);
+        if (t < 1) requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+
+    function buildToc() {
+      const article = document.getElementById("article-body");
+      const tocList = document.getElementById("toc-list");
+      if (!article || !tocList) return;
+      const headings = article.querySelectorAll("h2, h3");
+      tocList.innerHTML = "";
+      headings.forEach(function (h, index) {
+        if (!h.id) h.id = "sec-" + (index + 1);
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = "#" + h.id;
+        a.textContent = h.textContent || ("节 " + (index + 1));
+        li.appendChild(a);
+        tocList.appendChild(li);
+      });
+    }
+
+    function setupReadingProgress() {
+      const article = document.getElementById("article-body");
+      const progressValue = document.getElementById("progress-value");
+      if (!article || !progressValue) return;
+
+      function updateProgress() {
+        const rect = article.getBoundingClientRect();
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        const total = rect.height;
+        if (total <= 0) {
+          progressValue.textContent = "0%";
+          return;
+        }
+        const visibleTop = Math.min(Math.max(-rect.top, 0), total);
+        const ratio = Math.min(Math.max(visibleTop / total, 0), 1);
+        const percent = Math.round(ratio * 100);
+        progressValue.textContent = percent + "%";
+      }
+
+      document.addEventListener("scroll", updateProgress, {passive: true});
+      window.addEventListener("resize", updateProgress);
+      updateProgress();
+    }
+
+    document.addEventListener("DOMContentLoaded", function () {
+      buildToc();
+      setupReadingProgress();
+
+      var header = document.getElementById("page-header");
+      var toc = document.getElementById("toc-panel");
+      var article = document.getElementById("article-body");
+      var footer = document.getElementById("page-footer");
+
+      slideIn(header,  "top",    0,    700);
+      slideIn(toc,     "left",   150,  700);
+      slideIn(article, "right",  250,  800);
+      slideIn(footer,  "bottom", 400,  700);
+    });
+  </script>
+</body>
+</html>
+

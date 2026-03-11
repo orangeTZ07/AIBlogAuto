@@ -157,32 +157,112 @@ class BlogAgent:
         )
         return self._strip_code_fence(text)
 
+    def apply_css_to_html(self, html: str, css_content: str, style_href: str) -> str:
+        """将目标 CSS 应用到 HTML：
+        - 将 <link rel="stylesheet"> 的 href 设为 style_href
+        - 根据 CSS 选择器调整 HTML 元素的 class/id，确保 CSS 正确生效
+        - 不修改任何正文文字，不修改 CSS 内容，不添加内联样式
+        """
+        provider = create_provider(self.config)
+
+        # 预处理：去掉已有 style/script，减少 token 占用和 AI 干扰
+        clean_html = re.sub(r"(?is)<style[^>]*>.*?</style>", "", html)
+        clean_html = re.sub(r"(?is)<script[^>]*>.*?</script>", "", clean_html)
+        clean_html = re.sub(r"\n{3,}", "\n\n", clean_html).strip()
+
+        css_snippet = css_content[:10000]
+        html_snippet = clean_html[:12000]
+
+        prompt = (
+            "你的任务：修改下面的博客 HTML，使其正确引用并兼容给定的 CSS。\n\n"
+            "【必须完成】\n"
+            "1. 将 <head> 中 <link rel=\"stylesheet\"> 的 href 改为：" + style_href + "\n"
+            "   （若不存在此标签，在 </head> 前插入）\n"
+            "2. 对照 CSS 选择器，为 HTML 元素添加或调整 class / id 属性，"
+            "使 CSS 选择器能正确命中对应元素\n\n"
+            "【绝对禁止】\n"
+            "- 修改任何文字内容（标题、正文、日期、链接文字等），一字不改\n"
+            "- 增删 HTML 标签（只能改已有标签的 class/id 属性）\n"
+            "- 添加 <style> 标签或 style= 内联属性\n"
+            "- 修改 CSS 文件本身\n\n"
+            "只输出完整 HTML，不加任何说明或代码块标记。\n\n"
+            "CSS 内容（href=" + style_href + "）：\n" + css_snippet + "\n\n"
+            "HTML：\n" + html_snippet
+        )
+        text = provider.chat(
+            system_prompt=(
+                "你是网页兼容性助手，专门调整 HTML 的 class/id 使其与 CSS 正确配合。"
+                "绝不修改正文文字，绝不增删 HTML 标签，绝不添加内联样式。"
+            ),
+            user_prompt=prompt,
+            temperature=0.1,
+        )
+        result = self._strip_code_fence(text)
+        # 兜底：AI 返回空或明显错误时退回最简 href 替换
+        if not result or len(result) < 50:
+            fixed, n = re.subn(
+                r'(<link\b[^>]*\brel=["\']stylesheet["\'][^>]*\bhref=["\'])[^"\']*(["\'][^>]*>)'
+                r'|(<link\b[^>]*\bhref=["\'])[^"\']*(["\'][^>]*\brel=["\']stylesheet["\'][^>]*>)',
+                lambda m: (
+                    m.group(1) + style_href + m.group(2)
+                    if m.group(1)
+                    else m.group(3) + style_href + m.group(4)
+                ),
+                html,
+                count=1,
+            )
+            if n == 0:
+                fixed = html.replace(
+                    "</head>",
+                    f'  <link rel="stylesheet" href="{style_href}" />\n</head>',
+                    1,
+                )
+            return fixed
+        return result
+
     def extract_page_content(self, current_html: str) -> dict[str, str]:
         """从已有博客 HTML 中提取结构化内容（title/subtitle/date/content_html）。
         严格保留原文，用于风格改写时的内容迁移。
         """
         provider = create_provider(self.config)
-        html_snippet = current_html[:18000]
+
+        # 发送给 AI 前先剥掉 style/script/link，降低 token 用量并减少干扰
+        clean_html = re.sub(r"(?is)<style[^>]*>.*?</style>", "", current_html)
+        clean_html = re.sub(r"(?is)<script[^>]*>.*?</script>", "", clean_html)
+        clean_html = re.sub(r"(?is)<link[^>]*/?>", "", clean_html)
+        clean_html = re.sub(r"\n{3,}", "\n\n", clean_html).strip()
+
+        original_len = len(current_html)
+        html_snippet = clean_html[:14000]
+
         prompt = (
-            "从以下博客 HTML 中提取结构化内容，返回 JSON。\n"
-            "JSON 必须包含以下字段：\n"
-            "  title: 文章标题（字符串）\n"
-            "  subtitle: 文章副标题或简介（字符串，没有则填空字符串）\n"
-            "  date: 发布日期（字符串，没有则填空字符串）\n"
-            "  content_html: 文章正文 HTML。\n"
-            "    提取规则：\n"
-            "    - 只提取 <article> 或正文区域内的内容\n"
-            "    - 不包含页面大标题(<h1>文章名</h1>)、副标题、日期、导航栏、页脚等页面框架元素\n"
-            "    - 必须保留原文所有文字，一字不差\n"
-            "    - 保留原有段落 HTML 标签（<p>、<h2>、<ul>、<code> 等）\n"
-            "    - 严禁在 content_html 中包含任何 <style> 标签或 style= 内联属性\n"
-            "    - 严禁在 content_html 中包含任何 <script> 标签\n"
-            "严格禁止修改、增加或删除任何正文文字。\n"
-            "只输出 JSON，不加任何解释和代码块标记。\n\n"
+            "你的任务：从下面一篇已渲染的博客 HTML 页面中，只提取文章的正文内容片段。\n"
+            "返回 JSON，包含以下 4 个字段：\n"
+            "  title       文章标题字符串（通常是 <article> 内的 <h1> 或 <h2>）\n"
+            "  subtitle    副标题或简介字符串（没有则填空字符串）\n"
+            "  date        发布日期字符串（没有则填空字符串）\n"
+            "  content_html 正文 HTML 片段\n"
+            "\n"
+            "【content_html 的严格规则】\n"
+            "✓ 只能包含：<p> <h2> <h3> <h4> <ul> <ol> <li> <blockquote> <pre> <code>"
+            " <table> <thead> <tbody> <tr> <th> <td> <strong> <em> <a> <br> <hr> 等正文标签\n"
+            "✗ 绝对禁止出现：<html> <head> <body> <main> <header> <footer> <nav>"
+            " <title> <meta> <link> <style> <script> 以及任何 style= 内联属性\n"
+            "✗ 不要包含文章大标题（已单独用 title 字段存储）\n"
+            "✗ 不要包含副标题行、日期行、页眉、页脚、导航栏\n"
+            "\n"
+            "【自检规则】\n"
+            f"原始 HTML 总长度约 {original_len} 字符。"
+            " 如果你的 content_html 长度超过原始 HTML 的 50%，说明你把页面框架结构也包进去了，必须重新缩小。\n"
+            "\n"
+            "只输出 JSON，不加任何说明、注释或代码块标记。\n\n"
             f"HTML:\n{html_snippet}"
         )
         text = provider.chat(
-            system_prompt="你是博客内容提取助手，严格保留原文内容，输出纯 JSON。",
+            system_prompt=(
+                "你是博客正文提取助手。你的唯一职责是从完整 HTML 页面中找出"
+                "文章正文片段并以 JSON 返回，绝不能把页面框架结构作为正文输出。"
+            ),
             user_prompt=prompt,
             temperature=0.1,
         )

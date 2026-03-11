@@ -171,7 +171,9 @@ def _detect_update_notice() -> str | None:
     if behind <= 0:
         return None
     if ahead > 0:
-        return f"检测到新版本：当前分支落后 {behind} 个提交（本地超前 {ahead} 个提交）。"
+        return (
+            f"检测到新版本：当前分支落后 {behind} 个提交（本地超前 {ahead} 个提交）。"
+        )
     return f"检测到新版本：当前分支落后 {behind} 个提交，建议执行 git pull。"
 
 
@@ -859,8 +861,11 @@ def _restyle_one_post(
             style_href = os.path.relpath(
                 cfg.styles_dir / f"{style_name}.css", out_dir
             ).replace("\\", "/")
+            css_path: Path | None = cfg.styles_dir / f"{style_name}.css"
         else:
             style_href = _extract_existing_style_href(current_html)
+            # 尝试从相对 href 还原实际 CSS 路径，以便 AI 读取
+            css_path = (out_dir / style_href).resolve() if style_href else None
 
         title = extracted.get("title") or slug
         # 清理 AI 提取内容中可能残留的嵌入样式，防止覆盖目标 CSS
@@ -878,12 +883,22 @@ def _restyle_one_post(
             content_html=content_html,
             style_href=style_href,
         )
+        # AI 将目标 CSS 写入新 HTML 并调整 class/id 兼容性
+        if css_path and css_path.exists():
+            css_content = css_path.read_text(encoding="utf-8")
+            new_html = agent.apply_css_to_html(new_html, css_content, style_href)
     else:
-        # 仅换样式：正则替换 href，无需 AI
+        # 仅换样式：AI 读取 CSS 后写入 HTML 并调整兼容性
         new_href = os.path.relpath(
             cfg.styles_dir / f"{style_name}.css", out_dir
         ).replace("\\", "/")
-        new_html = _replace_stylesheet_href(current_html, new_href)
+        css_path = cfg.styles_dir / f"{style_name}.css"
+        if css_path.exists():
+            css_content = css_path.read_text(encoding="utf-8")
+            agent = BlogAgent(cfg)
+            new_html = agent.apply_css_to_html(current_html, css_content, new_href)
+        else:
+            new_html = _replace_stylesheet_href(current_html, new_href)
 
     out_path.write_text(new_html, encoding="utf-8")
     return out_path
@@ -1759,10 +1774,7 @@ class VimTUIApp:
         style_choice = self._choose_from_list(
             "这篇文章用什么样式？",
             [('使用默认样式（来自"换一个页面风格"）', "__default__")]
-            + [
-                (f"{n} [来源: {self._fmt_path(p)}]", n)
-                for n, p in styles.items()
-            ],
+            + [(f"{n} [来源: {self._fmt_path(p)}]", n) for n, p in styles.items()],
             default_idx=0,
         )
         if style_choice is None:
@@ -1950,8 +1962,7 @@ class VimTUIApp:
         chosen_style: str | None = None
         if use_existing == "yes":
             style_items = [("不使用样式（纯 HTML）", "__none__")] + [
-                (f"{n} [来源: {self._fmt_path(p)}]", n)
-                for n, p in styles.items()
+                (f"{n} [来源: {self._fmt_path(p)}]", n) for n, p in styles.items()
             ]
             picked = self._choose_from_list(
                 "选择要用于主页的样式", style_items, default_idx=0
@@ -2304,7 +2315,8 @@ class VimTUIApp:
             self._draw_header()
             self._safe_addstr(6, 2, title, self.c_purple)
             self._safe_addstr(
-                7, 2,
+                7,
+                2,
                 "j/k 移动  Space 切换  a 强制全选  A 取消全选  c 按分类全选  Enter 确认  q 取消",
                 self.c_text,
             )
@@ -2326,11 +2338,18 @@ class VimTUIApp:
                 row_style = self.c_focus if i == idx else self.c_text
                 skip_note = f"  ⚠ {skip_reason}" if skip_reason else ""
                 row_y = start_row + (i - offset)
-                self._safe_addstr(row_y, 2, f"{prefix} [{mark}] {label}{skip_note}", row_style)
+                self._safe_addstr(
+                    row_y, 2, f"{prefix} [{mark}] {label}{skip_note}", row_style
+                )
 
             sel_count = sum(1 for v in selected.values() if v)
             footer_row = start_row + min(len(items), max_visible) + 1
-            self._safe_addstr(footer_row, 2, f"已选 {sel_count}/{len(items)} 篇  按 Enter 确认", self.c_blue)
+            self._safe_addstr(
+                footer_row,
+                2,
+                f"已选 {sel_count}/{len(items)} 篇  按 Enter 确认",
+                self.c_blue,
+            )
             self._draw_footer()
             self.stdscr.refresh()
 
@@ -2351,7 +2370,9 @@ class VimTUIApp:
             elif key == ord("c"):
                 if categories:
                     cat_items = [(c, c) for c in categories]
-                    chosen_cat = self._choose_from_list("按分类全选：选择分类", cat_items)
+                    chosen_cat = self._choose_from_list(
+                        "按分类全选：选择分类", cat_items
+                    )
                     if chosen_cat:
                         cat_map = {item[1]: item for item in items}
                         for label, val, _, _ in items:
@@ -2409,9 +2430,13 @@ class VimTUIApp:
                 filled = int(width * done / total)
                 bar = "█" * filled + "·" * (width - filled)
                 self._safe_addstr(10, 4, f"[{bar}]", self.c_blue)
-                self._safe_addstr(12, 4, f"正在处理... ({done}/{total} 完成)", self.c_text)
+                self._safe_addstr(
+                    12, 4, f"正在处理... ({done}/{total} 完成)", self.c_text
+                )
                 if time.time() - started >= 60:
-                    self._safe_addstr(13, 4, "AI处理速度可能较慢，请耐心等待", self.c_red)
+                    self._safe_addstr(
+                        13, 4, "AI处理速度可能较慢，请耐心等待", self.c_red
+                    )
                 self._draw_footer()
                 self.stdscr.refresh()
                 time.sleep(0.1)
@@ -2441,18 +2466,17 @@ class VimTUIApp:
 
         # ① 选择改写范围
         scope = self._choose_from_list(
-            "改写风格：选择要改哪些",
+            "改写风格：选择要改哪些（建议先换框架，再单独换样式）",
             [
-                ("样式和框架都换", "both"),
                 ("仅换样式（CSS）", "style"),
-                ("仅换框架（HTML 模板）", "framework"),
+                ("仅换框架（HTML）", "framework"),
             ],
             default_idx=0,
         )
         if scope is None:
             return
-        change_style = scope in {"both", "style"}
-        change_framework = scope in {"both", "framework"}
+        change_style = scope == "style"
+        change_framework = scope == "framework"
 
         # ② 选目标 style
         target_style: str | None = None
@@ -2460,9 +2484,13 @@ class VimTUIApp:
             styles = list_styles(cfg.styles_dir)
             style_items = [(name, name) for name in styles]
             if not style_items:
-                self._show_message("没有可用样式", ["请先在 styles/ 目录中添加 CSS 文件。"])
+                self._show_message(
+                    "没有可用样式", ["请先在 styles/ 目录中添加 CSS 文件。"]
+                )
                 return
-            target_style = self._choose_from_list("选择目标样式（CSS）", style_items, default_idx=0)
+            target_style = self._choose_from_list(
+                "选择目标样式（CSS）", style_items, default_idx=0
+            )
             if target_style is None:
                 return
 
@@ -2472,7 +2500,9 @@ class VimTUIApp:
             frameworks = list_frameworks(cfg.frameworks_dir)
             frame_items = [(name, name) for name in frameworks]
             if not frame_items:
-                self._show_message("没有可用框架", ["请先在 frameworks/ 目录中添加 HTML 模板文件。"])
+                self._show_message(
+                    "没有可用框架", ["请先在 frameworks/ 目录中添加 HTML 模板文件。"]
+                )
                 return
             target_framework = self._choose_from_list(
                 "选择目标框架（HTML 模板）", frame_items, default_idx=0
@@ -2533,7 +2563,6 @@ class VimTUIApp:
 
         # ⑤ 确认
         scope_desc_map = {
-            "both": f"样式→{target_style}  框架→{target_framework}",
             "style": f"样式→{target_style}",
             "framework": f"框架→{target_framework}",
         }
@@ -2617,9 +2646,7 @@ class VimTUIApp:
             if key == ord("p") and successes:
                 first_slug = successes[0]
                 post_map_now = {
-                    p["slug"]: p
-                    for p in list_existing_blogs(cfg)
-                    if p.get("slug")
+                    p["slug"]: p for p in list_existing_blogs(cfg) if p.get("slug")
                 }
                 first_post = post_map_now.get(first_slug)
                 if first_post:
