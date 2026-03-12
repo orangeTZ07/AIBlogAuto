@@ -790,6 +790,127 @@ def list_existing_blogs(cfg: "BlogConfig") -> list[dict[str, str]]:
         return []
 
 
+def _prepare_external_restyle_packages(
+    cfg: "BlogConfig",
+    posts: list[dict[str, str]],
+    selected_slugs: list[str],
+    style_name: str | None,
+    framework_name: str | None,
+) -> list[tuple[str, Path]]:
+    """为外部 AI 编辑器准备改造目录：
+    - 在每篇文章的 index.html 同级目录下创建 ai_restyle* 子目录
+    - 复制当前选择的样式/style 和框架/framework 文件
+    - 写入 prompt.txt，指导外部 AI 如何改造 ../index.html
+    返回 (slug, 目录路径) 列表。
+    """
+    result: list[tuple[str, Path]] = []
+    frameworks = list_frameworks(cfg.frameworks_dir)
+
+    for slug in selected_slugs:
+        post = next((p for p in posts if p.get("slug") == slug), None)
+        if not post:
+            continue
+        page_url = str(post.get("page_url", "")).strip() or f"{slug}/index.html"
+        page_file = (cfg.output_dir / page_url).resolve()
+        if not page_file.exists():
+            continue
+        page_dir = page_file.parent
+
+        # 冲突时自动追加序号
+        base = page_dir / "ai_restyle"
+        target_dir = base
+        idx = 1
+        while target_dir.exists():
+            idx += 1
+            target_dir = page_dir / f"ai_restyle_{idx}"
+        target_dir.mkdir(parents=True, exist_ok=False)
+
+        copied_style: str | None = None
+        if style_name:
+            css_src = cfg.styles_dir / f"{style_name}.css"
+            if css_src.exists():
+                css_dst = target_dir / css_src.name
+                shutil.copy(css_src, css_dst)
+                copied_style = css_dst.name
+
+        copied_frame: str | None = None
+        if framework_name:
+            frame_path = frameworks.get(framework_name)
+            if frame_path and frame_path.exists():
+                frame_dst = target_dir / frame_path.name
+                shutil.copy(frame_path, frame_dst)
+                copied_frame = frame_dst.name
+
+        lines: list[str] = []
+        lines.append("你是一个顶级的网页改造与美化大师。")
+        lines.append(
+            "当前目录中包含一份 HTML 框架文件和/或一份 CSS 样式文件，"
+            "以及上一层目录中的 ../index.html（需要被改造的博客页面）。"
+        )
+        lines.append("")
+        lines.append("你的总体目标：")
+        lines.append(
+            "在不破坏文章内容、整体框架逻辑和基础交互的前提下，"
+            "最大化发挥本目录下 CSS 与 HTML 框架的潜力，让 ../index.html 变得更精致、清晰且富有设计感。"
+        )
+        lines.append("")
+        lines.append("硬性约束：")
+        lines.append(
+            "1. ../index.html 中的文章正文内容（标题与段落文字）可以调整排版，但文字本身一字不改。"
+        )
+        lines.append(
+            "2. 页面的核心结构和功能框架不能被破坏：例如整体是单栏还是左右布局、是否有侧边目录、"
+            "是否有阅读进度条或代码高亮区域，这些都应被保留或等价替代，而不是删除。"
+        )
+        lines.append(
+            "3. 页面应保持语义化结构（header/nav/main/article/aside/footer 等语义角色不能被随意移除），"
+            "但你可以在它们内部��更大胆的分组和层次调整。"
+        )
+        lines.append("")
+        lines.append("你可以自由发挥的空间：")
+        lines.append(
+            "4. 你可以在现有结构之上增加合理的包裹容器（例如卡片、分节容器），"
+            "调整 class / id 命名，重组局部布局，使阅读动线更顺畅。"
+        )
+        if copied_frame:
+            lines.append(
+                f"5. 以 {copied_frame} 中呈现的布局、结构和交互为设计锚点，"
+                "可以对 ../index.html 的 DOM 进行较为彻底的重构，只要整体结构与该框架保持同一设计语言，"
+                "并且不牺牲可读性与功能性。"
+            )
+        else:
+            lines.append(
+                "5. 在没有固定框架文件的情况下，你可以根据内容特点，重新规划 ../index.html 的分栏、留白和分节方式，"
+                "只要语义清晰、结构稳定即可。"
+            )
+        if copied_style:
+            lines.append(
+                f"6. 以 {copied_style} 定义的风格为主轴（颜色体系、字体氛围、间距节奏等），"
+                "可以对细节做明显但统一的美化，例如优化 hover 效果、阴影、圆角、分割线等。"
+            )
+            lines.append(
+                "   整体观感必须与原 CSS 保持同一审美方向，避免出现风格割裂或视觉噪音。"
+            )
+        lines.append(
+            "7. 如果框架中包含目录、阅读进度、代码高亮等脚本逻辑，你可以调整结构以让它们更好发挥作用，"
+            "但不要删除这些核心能力。"
+        )
+        lines.append("")
+        lines.append("最终交付期望：")
+        lines.append(
+            "一个经过你精心重构后的 ../index.html："
+            "框架结构稳定、交互完整、正文内容完全保留，"
+            "同时整体视觉风格与本目录下 CSS/框架保持一致且更有高级感。"
+        )
+
+        prompt_path = target_dir / "prompt.txt"
+        prompt_path.write_text("\n".join(lines), encoding="utf-8")
+
+        result.append((slug, target_dir))
+
+    return result
+
+
 def _extract_existing_style_href(html: str) -> str:
     """从 HTML 中提取现有 <link rel="stylesheet"> 的 href 值。"""
     m = re.search(
@@ -2604,16 +2725,30 @@ class VimTUIApp:
             self._show_message("未选择任何文章", ["请至少选中一篇文章再确认。"])
             return
 
-        # ⑤ 确认
+        # ⑤ 选择改写方式 & 确认
         scope_desc_map = {
             "style": f"样式→{target_style}",
             "framework": f"框架→{target_framework}",
         }
         scope_desc = scope_desc_map[scope]
-        confirm = self._choose_from_list(
-            f"即将改写 {len(selected_slugs)} 篇文章",
+        method = self._choose_from_list(
+            f"选择改写方式（共 {len(selected_slugs)} 篇，{scope_desc}）",
             [
-                (f"确认（{scope_desc}）", "yes"),
+                ("使用内置 AI 自动改写页面风格", "builtin"),
+                (
+                    "为外部 AI 编辑器准备改造目录（手动用其他工具改造）",
+                    "external",
+                ),
+            ],
+            default_idx=0,
+        )
+        if method is None:
+            return
+
+        confirm = self._choose_from_list(
+            f"即将对 {len(selected_slugs)} 篇文章执行：{scope_desc}",
+            [
+                ("确认继续", "yes"),
                 ("取消", "no"),
             ],
             default_idx=0,
@@ -2622,6 +2757,43 @@ class VimTUIApp:
             return
 
         # ⑥ 并发处理
+        if method == "external":
+            # 为外部 AI 编辑器准备改造目录
+            created = self._run_with_busy(
+                "正在为外部 AI 编辑器准备改造目录...",
+                lambda: _prepare_external_restyle_packages(
+                    cfg,
+                    posts,
+                    selected_slugs,
+                    target_style if change_style else None,
+                    target_framework if change_framework else None,
+                ),
+            )
+            if not created:
+                self._show_message(
+                    "未能创建改造目录",
+                    ["可能是 index.json 中的 page_url 无效，或页面文件不存在。"],
+                )
+                return
+
+            lines = []
+            for slug, path in created[:5]:
+                lines.append(f"{slug}: {self._fmt_path(path)}")
+            if len(created) > 5:
+                lines.append(f"... 其余 {len(created) - 5} 项已省略。")
+            self._show_message(
+                "改造目录已准备完成",
+                [
+                    "已在每篇文章的 index.html 同级目录下创建 ai_restyle* 子目录。",
+                    "你可以在这些目录中使用 Codex / Cursor 等外部 AI 编辑器，"
+                    "阅读 prompt.txt 和本目录中的 CSS/HTML 文件，对 ../index.html 进行手动改造。",
+                    "部分目录示例：",
+                    *lines,
+                ],
+            )
+            return
+
+        # 内置 AI 批量改写
         tasks = [
             (
                 slug,
