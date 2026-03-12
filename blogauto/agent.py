@@ -66,7 +66,8 @@ class BlogAgent:
         prompt = (
             "请生成博客 HTML 模板，只输出 HTML。\n"
             "必须保留占位符: {title} {blog_name} {subtitle} {date} {content_html} {style_href}\n"
-            "使用语义化标签。\n"
+            "使用语义化标签，可以根据需要加入合理的 <script> 以支持目录、高亮、阅读进度等交互。\n"
+            "如果加入了 JS，请直接内联在 <script> 标签中。\n"
             f"目标: {framework_goal}"
         )
         text = provider.chat(
@@ -89,6 +90,7 @@ class BlogAgent:
             prompt = (
                 "你在修改一个博客 HTML 模板。请根据反馈返回新的完整 HTML。\\n"
                 "必须保留占位符: {title} {blog_name} {subtitle} {date} {content_html} {style_href}\\n"
+                "可以根据需要保留或新增合理的 <script>，用于目录、代码高亮、阅读进度等交互功能。\\n"
                 "只输出 HTML，不要解释。\\n"
                 f"当前版本:\\n{current}\\n\\n用户反馈:\\n{feedback}"
             )
@@ -160,8 +162,9 @@ class BlogAgent:
     def apply_css_to_html(self, html: str, css_content: str, style_href: str) -> str:
         """将目标 CSS 应用到 HTML：
         - 将 <link rel="stylesheet"> 的 href 设为 style_href
-        - 根据 CSS 选择器调整 HTML 元素的 class/id，确保 CSS 正确生效
-        - 不修改任何正文文字，不修改 CSS 内容，不添加内联样式
+        - 根据 CSS 选择器调整 HTML 元素的 class/id，使样式得到更好的呈现
+        - 不修改任何正文文字，不添加内联样式，不增删或重排现有框架结构标签
+        - 模型可以“想象”对 CSS 做轻微美化性调整，但本函数只返回修改后的 HTML，不写回 CSS 文件
         """
         provider = create_provider(self.config)
 
@@ -174,28 +177,35 @@ class BlogAgent:
         html_snippet = clean_html[:12000]
 
         prompt = (
-            "你的任务：修改下面的博客 HTML，使其正确引用并兼容给定的 CSS。\n\n"
+            "你的任务：作为一名网页美化大师，在保留正文文字不变的前提下，"
+            "让下面这篇博客页面在给定 CSS 的加持下更精致、易读且层次清晰。\n\n"
             "【必须完成】\n"
             "1. 将 <head> 中 <link rel=\"stylesheet\"> 的 href 改为：" + style_href + "\n"
             "   （若不存在此标签，在 </head> 前插入）\n"
-            "2. 对照 CSS 选择器，为 HTML 元素添加或调整 class / id 属性，"
-            "使 CSS 选择器能正确命中对应元素\n\n"
+            "2. 仔细阅读给定 CSS，根据选择器含义（例如针对代码块、提示块、侧边栏、标题层级的样式），"
+            "   为 HTML 元素添加或调整 class / id 属性，使这些样式得到更合理的应用。\n"
+            "   可以适度重新分配哪些元素承担“主要内容区”“代码区”“侧栏”等角色，"
+            "   但必须在现有标签骨架内完成（不能新增/删除结构标签）。\n\n"
+            "【可以小幅度改写的范围】\n"
+            "- 可以在理解 CSS 的基础上，假设对部分视觉细节（如间距、圆角、阴影）的规则做轻微优化，"
+            "  并据此调整 HTML 的 class/id 使用方式，使整体效果更���观。\n"
+            "- 但本步骤不负责修改 CSS 文件本身，实际输出只包含更新后的 HTML。\n\n"
             "【绝对禁止】\n"
             "- 修改任何文字内容（标题、正文、日期、链接文字等），一字不改\n"
-            "- 增删 HTML 标签（只能改已有标签的 class/id 属性）\n"
-            "- 添加 <style> 标签或 style= 内联属性\n"
-            "- 修改 CSS 文件本身\n\n"
+            "- 增删或重排 HTML 框架结构标签（header/nav/main/article/aside/footer 等不得新增/删除/改层级）\n"
+            "- 添加 <style> 标签或 style= 内联属性\n\n"
             "只输出完整 HTML，不加任何说明或代码块标记。\n\n"
             "CSS 内容（href=" + style_href + "）：\n" + css_snippet + "\n\n"
             "HTML：\n" + html_snippet
         )
         text = provider.chat(
             system_prompt=(
-                "你是网页兼容性助手，专门调整 HTML 的 class/id 使其与 CSS 正确配合。"
-                "绝不修改正文文字，绝不增删 HTML 标签，绝不添加内联样式。"
+                "你是一名网页美化大师，擅长在不改变页面框架结构和正文文字的前提下，"
+                "通过精细调整 HTML 的 class/id 与现有 CSS 的配合方式，显著提升视觉效果和可读性。"
+                "你不会增删或重排结构标签，不会添加内联样式，也不会直接修改 CSS 文件内容。"
             ),
             user_prompt=prompt,
-            temperature=0.1,
+            temperature=0.4,
         )
         result = self._strip_code_fence(text)
         # 兜底：AI 返回空或明显错误时退回最简 href 替换

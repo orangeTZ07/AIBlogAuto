@@ -1,5 +1,7 @@
 # AIBlogAuto
 
+注意，在使用本项目前请务必确保已备份自己的博客文件！！
+
 <details>
   <summary><strong>目录导航（点击跳转）</strong></summary>
   <ul>
@@ -119,6 +121,12 @@ TUI 使用 Nerd Font 图标（如 `JetBrainsMono Nerd Font`）。
 
 将本程序放在你所期望的目录下(这里假设你没有使用参数进行启动)
 
+<br>
+
+- **注意**：一定要先对自己的博客目录或content目录进行备份。最好能够在“一键准备”时更换content目录到软件所在目录外，便于后期维护。
+
+<br>
+
 - 首先进行"一键准备"，配置你的默认样式、框架、内置agent等内容
   - 如果你选择了"\[1\] 读取环境变量（推荐）"，程序将从环境变量读取API KEY。该程序不会将API KEY自动加入到你的`bashrc`等配置文件中。
 - 准备后，执行"用内置AI生成样式/框架"，获取你喜欢的样式/框架
@@ -133,6 +141,10 @@ TUI 使用 Nerd Font 图标（如 `JetBrainsMono Nerd Font`）。
 - 运行"查看已有博客"，判断是否成功写入文章
 - 然后进行"生成主页（使用AI）"
 - 自此你的静态博客站已生成完毕
+
+<br>
+
+- **注意**：如果你想要不依赖本软件来生成框架，请务必确保框架生成包含以下提示词：" - 生成/修改框架 HTML 时，强制“必须保留占位符: {title} {blog_name} {subtitle} {date} {content_html} {style_href}`。"
 
 部署提示（以 GitHub Pages 为例）：
 

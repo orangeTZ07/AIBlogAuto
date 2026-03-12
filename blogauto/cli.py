@@ -33,6 +33,7 @@ from .registry import (
 )
 from .scanner import DirectoryScanner
 from .template_utils import render_template_placeholders
+from .ai_providers import create_provider
 
 UPSTREAM_REPO_URL = "https://github.com/orangeTZ07/AIBlogAuto.git"
 
@@ -851,9 +852,7 @@ def _restyle_one_post(
     out_dir = out_path.parent
 
     if framework_name:
-        # 需要 AI 提取内容，再套新模板
         agent = BlogAgent(cfg)
-        extracted = agent.extract_page_content(current_html)
         frameworks = list_frameworks(cfg.frameworks_dir)
         tpl = frameworks[framework_name].read_text(encoding="utf-8")
 
@@ -867,37 +866,74 @@ def _restyle_one_post(
             # 尝试从相对 href 还原实际 CSS 路径，以便 AI 读取
             css_path = (out_dir / style_href).resolve() if style_href else None
 
-        title = extracted.get("title") or slug
-        # 清理 AI 提取内容中可能残留的嵌入样式，防止覆盖目标 CSS
-        content_html = extracted.get("content_html") or ""
-        content_html = re.sub(r"(?is)<style[^>]*>.*?</style>", "", content_html)
-        content_html = re.sub(r"(?is)<script[^>]*>.*?</script>", "", content_html)
-        content_html = re.sub(r'\s+style="[^"]*"', "", content_html)
-        content_html = re.sub(r"\s+style='[^']*'", "", content_html)
-        new_html = render_template_placeholders(
-            tpl,
-            title=title,
-            blog_name="AI Blog",
-            subtitle=extracted.get("subtitle") or "",
-            date=extracted.get("date") or _date_cls.today().isoformat(),
-            content_html=content_html,
-            style_href=style_href,
-        )
-        # AI 将目标 CSS 写入新 HTML 并调整 class/id 兼容性
-        if css_path and css_path.exists():
-            css_content = css_path.read_text(encoding="utf-8")
-            new_html = agent.apply_css_to_html(new_html, css_content, style_href)
+        # 开关关闭：占位符式精确迁移（更省 token，更可控）
+        if not cfg.creative_restyle:
+            extracted = agent.extract_page_content(current_html)
+            title = extracted.get("title") or slug
+            # 清理 AI 提取内容中可能残留的嵌入样式，防止覆盖目标 CSS
+            content_html = extracted.get("content_html") or ""
+            content_html = re.sub(r"(?is)<style[^>]*>.*?</style>", "", content_html)
+            content_html = re.sub(r"(?is)<script[^>]*>.*?</script>", "", content_html)
+            content_html = re.sub(r'\s+style="[^"]*"', "", content_html)
+            content_html = re.sub(r"\s+style='[^']*'", "", content_html)
+            new_html = render_template_placeholders(
+                tpl,
+                title=title,
+                blog_name="AI Blog",
+                subtitle=extracted.get("subtitle") or "",
+                date=extracted.get("date") or _date_cls.today().isoformat(),
+                content_html=content_html,
+                style_href=style_href,
+            )
+            # AI 将目标 CSS 写入新 HTML 并调整 class/id 兼容性
+            if css_path and css_path.exists():
+                css_content = css_path.read_text(encoding="utf-8")
+                new_html = agent.apply_css_to_html(new_html, css_content, style_href)
+        else:
+            # 开关开启：创作式框架迁移，让 AI 阅读完整 framework + 当前页面后重构（不改正文）
+            provider = create_provider(cfg)
+            tpl_snippet = tpl[:14000]
+            current_snippet = current_html[:14000]
+            prompt = (
+                "现在有一篇已经渲染好的博客页面（旧 HTML），以及一个目标框架页面（framework HTML）。\n"
+                "请在不改变文章正文文字内容的前提下，将旧页面迁移到新框架结构中，输出新的完整 HTML。\n\n"
+                "【必须遵守】\n"
+                "1. 保留旧页面中的正文、标题、副标题和日期文本，一字不改；如有日期缺失，可以从旧页面推断或留空。\n"
+                "2. 充分利用目标框架页面的布局、组件和脚本能力（例如目录、阅读进度、代码高亮等），"
+                "让整体视觉和交互更加统一、美观。\n"
+                "3. 如果目标框架中已经有正文区域或代码块样式，请尽量将旧正文结构映射过去，"
+                "而不是简单原样嵌入。\n"
+                "4. 保留或复用框架中已有的 <script> 逻辑，必要时可以稍作调整以适配新的结构，但不要删除核心功能。\n"
+                "5. 不要生成额外的解释文字，只输出最终 HTML。\n\n"
+                "【旧页面 HTML】\n"
+                f"{current_snippet}\n\n"
+                "【目标框架 HTML】\n"
+                f"{tpl_snippet}\n"
+            )
+            text = provider.chat(
+                system_prompt=(
+                    "你是博客页面重构助手，专门在不改动正文文字的前提下，"
+                    "阅读现有 CSS/框架并对页面结构做创作式重构，使其在新框架下更美观、易读。"
+                ),
+                user_prompt=prompt,
+                temperature=0.4,
+            )
+            new_html = agent._strip_code_fence(text)  # type: ignore[attr-defined]
+            if not new_html or len(new_html) < 50:
+                new_html = current_html
     else:
-        # 仅换样式：AI 读取 CSS 后写入 HTML 并调整兼容性
+        # 仅换样式
         new_href = os.path.relpath(
             cfg.styles_dir / f"{style_name}.css", out_dir
         ).replace("\\", "/")
         css_path = cfg.styles_dir / f"{style_name}.css"
-        if css_path.exists():
+        if css_path.exists() and cfg.creative_restyle:
+            # 创作式样式迁移：让 AI 阅读 CSS + 当前 HTML 做更大胆的 class/id 调整（不改正文）
             css_content = css_path.read_text(encoding="utf-8")
             agent = BlogAgent(cfg)
             new_html = agent.apply_css_to_html(current_html, css_content, new_href)
         else:
+            # 精确模式：只替换 href，不让 AI 动结构，token 消耗更低
             new_html = _replace_stylesheet_href(current_html, new_href)
 
     out_path.write_text(new_html, encoding="utf-8")
@@ -1208,6 +1244,11 @@ class VimTUIApp:
                 "按你的习惯设置默认命令，供新建与查看博客时复用。",
             ),
             MenuItem(
+                "restyle_mode",
+                "切换风格改写模式（精确 / 创作式）",
+                "在占位符式精确改写与创作式重构之间切换，仅影响改写已有页面。",
+            ),
+            MenuItem(
                 "content_dir",
                 "设置 content 目录",
                 "手动输入绝对路径，路径必须以 /content/ 结尾。",
@@ -1215,7 +1256,7 @@ class VimTUIApp:
             MenuItem("query_blogs", "查看已有博客", "查看已创建博客列表及其目录位置。"),
             MenuItem(
                 "restyle_post",
-                "改写已有页面风格",
+                "改写已有页面风格（不完善，暂时不推荐使用）",
                 "选择一篇或多篇已有博客，用新的样式/框架重新渲染，原文内容保持不变。",
             ),
             MenuItem(
@@ -1600,6 +1641,8 @@ class VimTUIApp:
             self._action_set_theme()
         elif item.key == "openers":
             self._action_config_openers()
+        elif item.key == "restyle_mode":
+            self._action_toggle_restyle_mode()
         elif item.key == "content_dir":
             self._action_set_content_dir()
         elif item.key == "query_blogs":
@@ -2758,6 +2801,53 @@ class VimTUIApp:
             [
                 f"默认编辑器: {cfg.default_editor.strip() or _default_editor_cmd()}",
                 f"默认文件管理器: {cfg.default_file_manager.strip() or _default_file_manager_cmd()}",
+            ],
+        )
+
+    def _action_toggle_restyle_mode(self) -> None:
+        """在占位符式精确改写与创作式改写之间切换。"""
+        if not self._ensure_ready():
+            return
+        cfg = load_config(self.workspace)
+        current = bool(getattr(cfg, "creative_restyle", False))
+        mode_label = (
+            "创作式改写（更美观，消耗略多 token）"
+            if current
+            else "精确占位符改写（更可控，较朴素）"
+        )
+
+        choice = self._choose_from_list(
+            "选择风格改写模式",
+            [
+                (
+                    "精确占位符改写：基于 {content_html} 等占位符重新渲染，结构较固定。",
+                    "precise",
+                ),
+                (
+                    "创作式改写：让 AI 阅读 CSS/框架 + 旧页面后重构结构（不改正文）。",
+                    "creative",
+                ),
+            ],
+            default_idx=1 if current else 0,
+        )
+        if choice is None:
+            return
+
+        cfg.creative_restyle = choice == "creative"
+        save_config(cfg)
+        self._log(
+            f"已切换风格改写模式为: {'creative' if cfg.creative_restyle else 'precise'}"
+        )
+        self._show_message(
+            "风格改写模式已更新",
+            [
+                "当前模式："
+                + (
+                    "创作式改写（不改文章内容，结构/样式更灵活）"
+                    if cfg.creative_restyle
+                    else "精确占位符改写（结构更可控，视觉相对保守）"
+                ),
+                "提示：此设置仅影响“改写已有页面风格”菜单，不影响新页面生成。",
             ],
         )
 

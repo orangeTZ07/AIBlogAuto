@@ -24,6 +24,8 @@ class BlogConfig:
     draft_structure_template: str = "{slug}"
     default_editor: str = ""
     default_file_manager: str = ""
+    # 是否在改样式/改框架时使用“创作式” AI 改写（不改正文，但可以创意调整结构与样式映射）
+    creative_restyle: bool = False
 
     @property
     def content_dir(self) -> Path:
@@ -81,6 +83,7 @@ def load_config(workspace: Path) -> BlogConfig:
         draft_structure_template=data.get("draft_structure_template", "{slug}"),
         default_editor=data.get("default_editor", ""),
         default_file_manager=data.get("default_file_manager", ""),
+        creative_restyle=data.get("creative_restyle", False),
     )
 
 
@@ -102,6 +105,7 @@ def save_config(config: BlogConfig) -> None:
                 "draft_structure_template": config.draft_structure_template,
                 "default_editor": config.default_editor,
                 "default_file_manager": config.default_file_manager,
+                "creative_restyle": config.creative_restyle,
             },
             ensure_ascii=False,
             indent=2,

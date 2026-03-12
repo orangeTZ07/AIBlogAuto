@@ -2,11 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>主标题</title>
+  <title>{title} - {blog_name}</title>
+  <link rel="stylesheet" href="{style_href}" />
 </head>
 <body>
   <header id="page-header">
-    <h1>主标题</h1>
+    <h1>{title}</h1>
+    <p>{subtitle}</p>
+    <p>{blog_name} · {date}</p>
   </header>
 
   <main id="layout-root">
@@ -14,7 +17,7 @@
       <h2>目录</h2>
       <nav>
         <ol id="toc-list">
-          <!-- h2/h3 自动生成 -->
+          <!-- 根据正文 h2/h3 自动生成 -->
         </ol>
       </nav>
       <section id="reading-progress" aria-label="阅读进度">
@@ -23,29 +26,16 @@
     </aside>
 
     <article id="article-body">
-      <section>
-        <h2>部分一</h2>
-        <p>简要内容。</p>
-      </section>
-
-      <section>
-        <h2>部分二</h2>
-        <h3>要点 2.1</h3>
-        <p>关键要点。</p>
-      </section>
-
-      <section>
-        <h2>总结</h2>
-        <p>结论与行动。</p>
-      </section>
+      {content_html}
     </article>
   </main>
 
   <footer id="page-footer">
-    <p>可复用框架。</p>
+    <p>{blog_name}</p>
   </footer>
 
   <script>
+    // 简单的滑入动画，进入时让布局更有动效感
     function slideIn(el, direction, delayMs, durationMs) {
       if (!el) return;
       const startTime = performance.now() + delayMs;
@@ -76,6 +66,7 @@
       requestAnimationFrame(frame);
     }
 
+    // 从正文 {content_html} 中提取 h2/h3 自动生成目录
     function buildToc() {
       const article = document.getElementById("article-body");
       const tocList = document.getElementById("toc-list");
@@ -93,6 +84,7 @@
       });
     }
 
+    // 基于正文高度计算一个简单的阅读进度
     function setupReadingProgress() {
       const article = document.getElementById("article-body");
       const progressValue = document.getElementById("progress-value");
@@ -100,7 +92,6 @@
 
       function updateProgress() {
         const rect = article.getBoundingClientRect();
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
         const total = rect.height;
         if (total <= 0) {
           progressValue.textContent = "0%";
@@ -117,9 +108,81 @@
       updateProgress();
     }
 
+    // 为代码块添加折叠与一键复制功能
+    function enhanceCodeBlocks() {
+      const article = document.getElementById("article-body");
+      if (!article) return;
+      const blocks = article.querySelectorAll("pre code, pre");
+      blocks.forEach(function (codeEl, index) {
+        // 兼容 <pre><code> 和裸 <pre>
+        const pre = codeEl.tagName === "PRE" ? codeEl : codeEl.closest("pre");
+        if (!pre || pre.dataset.enhanced === "1") return;
+        pre.dataset.enhanced = "1";
+
+        const wrapper = document.createElement("div");
+        wrapper.className = "code-block";
+
+        const header = document.createElement("div");
+        header.className = "code-block__header";
+        const title = document.createElement("span");
+        title.className = "code-block__title";
+        title.textContent = codeEl.getAttribute("data-lang") || "代码片段";
+
+        const actions = document.createElement("div");
+        actions.className = "code-block__actions";
+
+        const toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "code-block__btn code-block__btn--toggle";
+        toggleBtn.textContent = "折叠";
+
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "code-block__btn code-block__btn--copy";
+        copyBtn.textContent = "复制";
+
+        actions.appendChild(toggleBtn);
+        actions.appendChild(copyBtn);
+        header.appendChild(title);
+        header.appendChild(actions);
+
+        const body = document.createElement("div");
+        body.className = "code-block__body";
+
+        pre.parentNode.insertBefore(wrapper, pre);
+        body.appendChild(pre);
+        wrapper.appendChild(header);
+        wrapper.appendChild(body);
+
+        toggleBtn.addEventListener("click", function () {
+          const collapsed = body.classList.toggle("code-block__body--collapsed");
+          toggleBtn.textContent = collapsed ? "展开" : "折叠";
+        });
+
+        copyBtn.addEventListener("click", function () {
+          let text = "";
+          if (codeEl.tagName === "CODE") {
+            text = codeEl.innerText || codeEl.textContent || "";
+          } else {
+            text = pre.innerText || pre.textContent || "";
+          }
+          if (!text) return;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              copyBtn.textContent = "已复制";
+              setTimeout(function () {
+                copyBtn.textContent = "复制";
+              }, 1500);
+            });
+          }
+        });
+      });
+    }
+
     document.addEventListener("DOMContentLoaded", function () {
       buildToc();
       setupReadingProgress();
+       enhanceCodeBlocks();
 
       var header = document.getElementById("page-header");
       var toc = document.getElementById("toc-panel");
@@ -134,4 +197,3 @@
   </script>
 </body>
 </html>
-
